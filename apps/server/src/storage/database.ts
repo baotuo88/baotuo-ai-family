@@ -637,6 +637,17 @@ export class AppDatabase {
     return rows.map(toSessionRecord);
   }
 
+  listSessionLifecycle(): { id: string; status: string; lastActiveAt: string }[] {
+    return (this.db
+      .prepare("SELECT id, status, last_active_at FROM sessions")
+      .all() as Array<Record<string, unknown>>)
+      .map((row) => ({
+        id: String(row.id),
+        status: String(row.status),
+        lastActiveAt: String(row.last_active_at),
+      }));
+  }
+
   saveSession(input: {
     id: string;
     wechatAccountId: string;

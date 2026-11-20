@@ -75,6 +75,11 @@ export interface FileSendConfig {
   maxBytes: number;
 }
 
+export interface RetentionConfig {
+  retentionDays: number;
+  maxWorkspaceBytes: number;
+}
+
 export interface PromptTemplateConfig {
   adminAcp: string;
   adminApi: string;
@@ -125,4 +130,5 @@ export interface AppConfig {
   prompts: PromptTemplateConfig;
   familyPolicy: FamilyPolicyConfig;
   fileSend: FileSendConfig;
+  retention: RetentionConfig;
 }

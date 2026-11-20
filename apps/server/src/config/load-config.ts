@@ -896,5 +896,12 @@ export function loadConfig(): AppConfig {
       allowedDirs: fileAllowedDirs,
       maxBytes: readPositiveInteger("FILE_SEND_MAX_BYTES", 50 * 1024 * 1024),
     },
+    retention: {
+      retentionDays: readPositiveInteger("DATA_RETENTION_DAYS", 30),
+      maxWorkspaceBytes: readPositiveInteger(
+        "DATA_MAX_WORKSPACE_BYTES",
+        10 * 1024 * 1024 * 1024,
+      ),
+    },
   };
 }

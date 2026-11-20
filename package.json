@@ -18,6 +18,7 @@
     "doctor": "node dist/apps/server/doctor.js",
     "compat:codex": "node dist/apps/server/codex-compat-regression.js",
     "backup": "node dist/apps/server/backup.js",
+    "cleanup": "node dist/apps/server/cleanup.js",
     "codex:configure": "node dist/apps/server/configure-codex.js",
     "codex:api-wrapper": "node dist/apps/server/codex-api-wrapper.js",
     "file:send": "node dist/apps/server/send-file.js",

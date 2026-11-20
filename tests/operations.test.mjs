@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { AppDatabase } from '../dist/apps/server/storage/database.js';
 import { RuntimeStatus } from '../dist/apps/server/operations/runtime-status.js';
 import { routeHttpRequest } from '../dist/apps/server/http/routes.js';
 import { loadConfig } from '../dist/apps/server/config/load-config.js';
 import { choosePermissionOption, shouldReviewDeniedFamilyPermission, assertFamilyIsolation, FAMILY_HARD_BLOCKED_COMMANDS } from '../dist/apps/server/codex/permission-policy.js';
+import { applyCleanupPlan, collectCleanupPlan } from '../dist/apps/server/storage/cleanup.js';
+import { acquireDataLock } from '../dist/apps/server/storage/data-lock.js';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-operations-'));
@@ -101,6 +105,101 @@ test('job status list selects the newest 100 before dashboard prioritization', t
   assert.equal(jobs[0].id, 106);
   assert.equal(jobs.at(-1).id, 7);
   assert.equal(jobs.some(job => job.id === 1), false);
+});
+
+test('workspace cleanup previews retention and quota candidates while protecting active sessions', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-cleanup-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const oldFile = path.join(root, 'inbox', 'archived', 'old.bin');
+  const activeFile = path.join(root, 'outbox', 'active', 'large.bin');
+  const recentFile = path.join(root, 'office', 'archived', 'recent.bin');
+  for (const file of [oldFile, activeFile, recentFile]) fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(oldFile, Buffer.alloc(4));
+  fs.writeFileSync(activeFile, Buffer.alloc(12));
+  fs.writeFileSync(recentFile, Buffer.alloc(5));
+  const oldTime = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  fs.utimesSync(oldFile, oldTime, oldTime);
+  fs.utimesSync(activeFile, oldTime, oldTime);
+  const plan = collectCleanupPlan({
+    dataDir: root,
+    activeSessionIds: new Set(['active']),
+    retentionDays: 30,
+    maxWorkspaceBytes: 10,
+  });
+  assert.deepEqual(plan.candidates.map(item => item.relativePath), [
+    path.join('inbox', 'archived', 'old.bin'),
+    path.join('office', 'archived', 'recent.bin'),
+  ]);
+  assert.equal(plan.candidateBytes, 9);
+  assert.equal(plan.remainingBytes, 12);
+  assert.equal(plan.quotaSatisfied, false);
+  assert.equal(fs.existsSync(oldFile), true);
+  fs.writeFileSync(recentFile, Buffer.alloc(5));
+  const changedTime = new Date(Date.now() + 2000);
+  fs.utimesSync(recentFile, changedTime, changedTime);
+  const result = applyCleanupPlan({ dataDir: root, plan });
+  assert.equal(result.removedFiles, 1);
+  assert.equal(result.skippedFiles, 1);
+  assert.equal(fs.existsSync(activeFile), true);
+  assert.equal(fs.existsSync(recentFile), true);
+});
+
+test('cleanup CLI previews without deleting and refuses a running gateway lock', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-cleanup-cli-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, 'data');
+  const staleFile = path.join(dataDir, 'inbox', 'archived', 'stale.bin');
+  fs.mkdirSync(path.dirname(staleFile), { recursive: true });
+  fs.writeFileSync(staleFile, 'stale');
+  const oldTime = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  fs.utimesSync(staleFile, oldTime, oldTime);
+  const script = fileURLToPath(new URL('../dist/apps/server/cleanup.js', import.meta.url));
+  const run = args => spawnSync(process.execPath, [script, ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, DATA_DIR: dataDir },
+  });
+  const preview = run(['--json']);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.equal(JSON.parse(preview.stdout).candidates.length, 1);
+  assert.equal(fs.existsSync(staleFile), true);
+
+  const release = acquireDataLock(dataDir);
+  try {
+    const blocked = run(['--apply']);
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /Data directory is in use/);
+    assert.equal(fs.existsSync(staleFile), true);
+  } finally {
+    release();
+  }
+
+  const applied = run(['--apply', '--json']);
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.equal(JSON.parse(applied.stdout).result.removedFiles, 1);
+  assert.equal(fs.existsSync(staleFile), false);
+});
+
+test('cleanup skips candidates whose parent directory became a symlink after preview', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-cleanup-symlink-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const managedDir = path.join(root, 'inbox', 'archived');
+  const outsideDir = path.join(root, 'outside');
+  fs.mkdirSync(managedDir, { recursive: true });
+  fs.mkdirSync(outsideDir);
+  const managedFile = path.join(managedDir, 'stale.bin');
+  const outsideFile = path.join(outsideDir, 'stale.bin');
+  fs.writeFileSync(managedFile, 'managed');
+  fs.writeFileSync(outsideFile, 'outside');
+  const oldTime = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  fs.utimesSync(managedFile, oldTime, oldTime);
+  const plan = collectCleanupPlan({ dataDir: root, retentionDays: 30, maxWorkspaceBytes: 1024 });
+  fs.rmSync(managedDir, { recursive: true });
+  fs.symlinkSync(outsideDir, managedDir, 'dir');
+  const result = applyCleanupPlan({ dataDir: root, plan });
+  assert.equal(result.removedFiles, 0);
+  assert.equal(result.skippedFiles, 1);
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'outside');
 });
 
 test('management job resolution requires auth, confirmation and needs_review state; replay is rejected', async t => {

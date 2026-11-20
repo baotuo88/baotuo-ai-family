@@ -116,6 +116,17 @@ docker compose -f compose.yaml -f compose.sandbox.yaml exec gateway node dist/ap
 - `inbox`、`office`、`outbox` 附件和成品；
 - `backups` 备份、`.maintenance` 数据锁及恢复前副本。
 
+工作区文件可以通过维护命令预览清理。默认保留 30 天，目标容量 10 GiB；清理只作用于 `inbox/`、`office/`、`outbox/`，活动会话受保护。先停止服务，再在容器中执行：
+
+```bash
+docker compose stop gateway
+docker compose run --rm gateway node dist/apps/server/cleanup.js
+docker compose run --rm gateway node dist/apps/server/cleanup.js --apply
+docker compose up -d
+```
+
+第一次执行应先检查预览候选。详细选项和保护范围见[工作区文件清理说明](operations.md#工作区文件清理)。
+
 镜像以 `node` 用户（UID/GID 1000）运行，新命名卷继承镜像内 `/data` 的所有权。如果换成 bind mount，请事先让 UID 1000 能写入该目录。入口脚本不会自动 chown 宿主机挂载目录。
 
 机器人操作发生在容器内；它不能直接管理宿主机 systemd、个人 Codex 或宿主机文件。当前 Compose 没有挂载个人 `~/.codex`、项目源码或 Docker socket。
