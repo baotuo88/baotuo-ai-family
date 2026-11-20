@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { AppDatabase } from '../dist/apps/server/storage/database.js';
-import { createBackup, restoreBackup, verifyBackup } from '../dist/apps/server/storage/backup.js';
+import { createBackup, createEncryptedBackup, drillBackup, drillEncryptedBackup, restoreBackup, restoreEncryptedBackup, verifyBackup, verifyEncryptedBackup } from '../dist/apps/server/storage/backup.js';
 import { acquireDataLock } from '../dist/apps/server/storage/data-lock.js';
 import { authorizeManagement } from '../dist/apps/server/http/auth.js';
 import { routeHttpRequest } from '../dist/apps/server/http/routes.js';
@@ -141,6 +141,47 @@ test('WAL backup verifies, restores exact data, preserves credentials and retain
   const restored = new AppDatabase(path.join(data, dbName));
   try { restored.initialize(); assert.equal(restored.getPollingCursor('account'), 'cursor'); assert.equal(restored.listQueuedJobs().length, 1); }
   finally { restored.close(); }
+});
+
+test('restore drill restores into an isolated temporary directory and reports record counts', t => {
+  const root = fixture(t), data = path.join(root, 'data'), backup = path.join(root, 'backup');
+  const db = new AppDatabase(path.join(data, dbName)); db.initialize(); account(db);
+  db.receiveInboundBatch('account', 'cursor', [message('drill-message')]);
+  db.saveSession({ id: 'drill-session', wechatAccountId: 'account', contactId: 'contact', role: 'family', summaryText: '', status: 'active' });
+  try { createBackup(data, backup); } finally { db.close(); }
+  const tempEntriesBefore = new Set(fs.readdirSync(os.tmpdir()));
+  assert.deepEqual(drillBackup(backup), { accounts: 1, sessions: 1, inboundJobs: 1 });
+  assert.deepEqual(fs.readdirSync(data).sort(), [dbName]);
+  const createdDrillDirs = fs.readdirSync(os.tmpdir()).filter(name => name.startsWith('gateway-restore-drill-') && !tempEntriesBefore.has(name));
+  assert.deepEqual(createdDrillDirs, []);
+});
+
+test('encrypted backups authenticate, verify, drill and restore with a separate passphrase', t => {
+  const root = fixture(t), data = path.join(root, 'data'), backup = path.join(root, 'backup.enc');
+  const restoreTarget = path.join(root, 'restored');
+  const db = new AppDatabase(path.join(data, dbName)); db.initialize(); account(db);
+  db.receiveInboundBatch('account', 'cursor', [message('encrypted-message')]);
+  fs.mkdirSync(path.join(data, 'outbox'), { recursive: true });
+  fs.writeFileSync(path.join(data, 'outbox', 'private-artifact.txt'), 'confidential-artifact-content');
+  try { createEncryptedBackup(data, backup, 'separate-test-passphrase'); } finally { db.close(); }
+  const encrypted = fs.readFileSync(backup);
+  assert.equal(encrypted.includes(Buffer.from('confidential-artifact-content')), false);
+  assert.equal(encrypted.includes(Buffer.from('private-artifact.txt')), true);
+  assert.equal(verifyEncryptedBackup(backup, 'separate-test-passphrase').version, 1);
+  assert.deepEqual(drillEncryptedBackup(backup, 'separate-test-passphrase'), { accounts: 1, sessions: 0, inboundJobs: 1 });
+  assert.throws(() => verifyEncryptedBackup(backup, 'wrong-passphrase'));
+  const corrupted = path.join(root, 'corrupted.enc');
+  const corruptedBytes = Buffer.from(encrypted);
+  corruptedBytes[corruptedBytes.length - 1] ^= 1;
+  fs.writeFileSync(corrupted, corruptedBytes);
+  assert.throws(() => verifyEncryptedBackup(corrupted, 'separate-test-passphrase'));
+  const occupied = path.join(root, 'occupied.enc');
+  fs.writeFileSync(occupied, 'keep-existing-backup');
+  assert.throws(() => createEncryptedBackup(data, occupied, 'separate-test-passphrase'), /exist/i);
+  assert.equal(fs.readFileSync(occupied, 'utf8'), 'keep-existing-backup');
+  assert.throws(() => createEncryptedBackup(data, path.join(root, 'empty-key.enc'), ''), /must not be empty/);
+  restoreEncryptedBackup(backup, restoreTarget, 'separate-test-passphrase');
+  assert.equal(fs.readFileSync(path.join(restoreTarget, 'outbox', 'private-artifact.txt'), 'utf8'), 'confidential-artifact-content');
 });
 
 test('corrupt backups and live-service restores are rejected without modifying target', t => {

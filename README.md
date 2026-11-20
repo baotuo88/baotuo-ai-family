@@ -305,6 +305,8 @@ sudo systemctl restart baotuo-ai-family
 
 ```bash
 node dist/apps/server/backup.js
+node dist/apps/server/backup.js --drill /path/to/backup
+BACKUP_PASSPHRASE_FILE=/run/secrets/backup-passphrase node dist/apps/server/backup.js --encrypted --out /path/to/backup.enc
 node dist/apps/server/backup.js --restore /path/to/backup --yes
 ```
 

@@ -1,10 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { acquireDataLock } from "./data-lock.js";
 
 const DB_NAME = "weixin-household-gateway.sqlite";
+const ENCRYPTED_MAGIC = Buffer.from("BAOTUO-ENC-BACKUP\0", "ascii");
+const ENCRYPTED_VERSION = 1;
+const ENCRYPTED_SALT_BYTES = 16;
+const ENCRYPTED_IV_BYTES = 12;
+const ENCRYPTED_TAG_BYTES = 16;
+const ENCRYPTED_KEY_BYTES = 32;
+const ENCRYPTED_CHUNK_BYTES = 1024 * 1024;
 interface Manifest {
   version: 1;
   files: Record<string, string>;
@@ -15,7 +23,50 @@ function inside(child: string, parent: string): boolean {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 function hash(file: string): string {
-  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const digest = crypto.createHash("sha256");
+  const fd = fs.openSync(file, "r");
+  try {
+    const buffer = Buffer.alloc(ENCRYPTED_CHUNK_BYTES);
+    let position = 0;
+    for (;;) {
+      const read = fs.readSync(fd, buffer, 0, buffer.length, position);
+      if (read === 0) break;
+      digest.update(buffer.subarray(0, read));
+      position += read;
+    }
+    return digest.digest("hex");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+function deriveBackupKey(passphrase: string, salt: Buffer): Buffer {
+  if (!passphrase) throw new Error("Backup passphrase must not be empty");
+  return crypto.scryptSync(passphrase, salt, ENCRYPTED_KEY_BYTES, {
+    N: 32_768,
+    r: 8,
+    p: 1,
+    maxmem: 64 * 1024 * 1024,
+  });
+}
+function writeAll(fd: number, buffer: Buffer): void {
+  let offset = 0;
+  while (offset < buffer.length) offset += fs.writeSync(fd, buffer, offset);
+}
+function readExact(fd: number, length: number, state: { position: number }): Buffer {
+  const output = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const read = fs.readSync(fd, output, offset, length - offset, state.position);
+    if (read === 0) throw new Error("Encrypted backup is truncated");
+    offset += read;
+    state.position += read;
+  }
+  return output;
+}
+function safeEncryptedName(name: string): void {
+  if (!name || name.includes("\\") || name.includes("\0") || path.isAbsolute(name) || name.split(path.sep).some(part => part === ".." || part === ".")) {
+    throw new Error(`Invalid encrypted backup path: ${name}`);
+  }
 }
 function walk(root: string, relative = ""): string[] {
   const files: string[] = [];
@@ -59,6 +110,190 @@ export function verifyBackup(directory: string): Manifest {
   checkDatabase(path.join(root, DB_NAME));
   return manifest;
 }
+
+function resolveBackupTarget(source: string, destination: string): string {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const target = path.join(fs.realpathSync(path.dirname(destination)), path.basename(destination));
+  const backupDir = path.join(source, "backups");
+  if (inside(source, target) || (inside(target, source) && !inside(target, backupDir))) {
+    throw new Error("Backup must be outside DATA_DIR or inside DATA_DIR/backups");
+  }
+  return target;
+}
+
+function encryptedFiles(root: string): string[] {
+  return walk(root).sort();
+}
+
+export function createEncryptedBackup(dataDir: string, destination: string, passphrase: string): void {
+  if (!passphrase) throw new Error("Backup passphrase must not be empty");
+  const source = fs.realpathSync(dataDir);
+  const target = resolveBackupTarget(source, path.resolve(destination));
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-encrypted-backup-"));
+  const plaintext = path.join(temporaryRoot, "backup");
+  let output = 0;
+  let createdTarget = false;
+  try {
+    createBackup(source, plaintext);
+    const salt = crypto.randomBytes(ENCRYPTED_SALT_BYTES);
+    const key = deriveBackupKey(passphrase, salt);
+    output = fs.openSync(target, "wx", 0o600);
+    createdTarget = true;
+    writeAll(output, ENCRYPTED_MAGIC);
+    writeAll(output, Buffer.from([ENCRYPTED_VERSION]));
+    writeAll(output, salt);
+    for (const name of encryptedFiles(plaintext)) {
+      const inputPath = path.join(plaintext, name);
+      const stat = fs.statSync(inputPath);
+      const iv = crypto.randomBytes(ENCRYPTED_IV_BYTES);
+      const nameBytes = Buffer.from(name, "utf8");
+      const recordHeader = Buffer.from(JSON.stringify({ name, size: stat.size, iv: iv.toString("base64") }), "utf8");
+      if (recordHeader.length > 1024 * 1024) throw new Error("Encrypted backup record header is too large");
+      const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+      cipher.setAAD(nameBytes);
+      const headerLength = Buffer.alloc(4);
+      headerLength.writeUInt32BE(recordHeader.length, 0);
+      writeAll(output, headerLength);
+      writeAll(output, recordHeader);
+      const input = fs.openSync(inputPath, "r");
+      try {
+        const chunk = Buffer.alloc(ENCRYPTED_CHUNK_BYTES);
+        let position = 0;
+        while (position < stat.size) {
+          const read = fs.readSync(input, chunk, 0, Math.min(chunk.length, stat.size - position), position);
+          if (read === 0) throw new Error(`Failed to read backup file: ${name}`);
+          writeAll(output, cipher.update(chunk.subarray(0, read)));
+          position += read;
+        }
+        writeAll(output, cipher.final());
+      } finally {
+        fs.closeSync(input);
+      }
+      writeAll(output, cipher.getAuthTag());
+    }
+    fs.closeSync(output);
+    output = 0;
+    fs.chmodSync(target, 0o600);
+    verifyEncryptedBackup(target, passphrase);
+  } catch (error) {
+    if (output) fs.closeSync(output);
+    if (createdTarget) fs.rmSync(target, { force: true });
+    throw error;
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function decryptEncryptedBackup(source: string, destination: string, passphrase: string): Manifest {
+  const inputPath = fs.realpathSync(source);
+  if (!fs.lstatSync(inputPath).isFile()) throw new Error("Encrypted backup must be a regular file");
+  fs.mkdirSync(destination, { recursive: false, mode: 0o700 });
+  let input = 0;
+  try {
+    input = fs.openSync(inputPath, "r");
+    const fileSize = fs.fstatSync(input).size;
+    const state = { position: 0 };
+    if (!readExact(input, ENCRYPTED_MAGIC.length, state).equals(ENCRYPTED_MAGIC)) throw new Error("Unsupported encrypted backup format");
+    if (readExact(input, 1, state).readUInt8(0) !== ENCRYPTED_VERSION) throw new Error("Unsupported encrypted backup version");
+    const key = deriveBackupKey(passphrase, readExact(input, ENCRYPTED_SALT_BYTES, state));
+    const seen = new Set<string>();
+    while (state.position < fileSize) {
+      const length = readExact(input, 4, state).readUInt32BE(0);
+      if (length === 0 || length > 1024 * 1024) throw new Error("Invalid encrypted backup record");
+      const record = JSON.parse(readExact(input, length, state).toString("utf8")) as { name?: string; size?: number; iv?: string };
+      const name = record.name ?? "";
+      safeEncryptedName(name);
+      const size = record.size;
+      if (seen.has(name) || typeof size !== "number" || !Number.isSafeInteger(size) || size < 0 || !record.iv) throw new Error(`Invalid encrypted backup record: ${name}`);
+      const iv = Buffer.from(record.iv, "base64");
+      if (iv.length !== ENCRYPTED_IV_BYTES) throw new Error(`Invalid encrypted backup IV: ${name}`);
+      const destinationPath = path.join(destination, name);
+      if (!inside(path.resolve(destinationPath), path.resolve(destination))) throw new Error(`Encrypted backup path escaped destination: ${name}`);
+      fs.mkdirSync(path.dirname(destinationPath), { recursive: true, mode: 0o700 });
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAAD(Buffer.from(name, "utf8"));
+      const output = fs.openSync(destinationPath, "wx", 0o600);
+      try {
+        let remaining = size;
+        while (remaining > 0) {
+          const chunk = readExact(input, Math.min(ENCRYPTED_CHUNK_BYTES, remaining), state);
+          writeAll(output, decipher.update(chunk));
+          remaining -= chunk.length;
+        }
+        decipher.setAuthTag(readExact(input, ENCRYPTED_TAG_BYTES, state));
+        writeAll(output, decipher.final());
+      } finally {
+        fs.closeSync(output);
+      }
+      if (fs.statSync(destinationPath).size !== size) throw new Error(`Encrypted backup size mismatch: ${name}`);
+      seen.add(name);
+    }
+    fs.closeSync(input);
+    input = 0;
+    return verifyBackup(destination);
+  } catch (error) {
+    if (input) fs.closeSync(input);
+    fs.rmSync(destination, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function withDecryptedBackup<T>(source: string, passphrase: string, callback: (directory: string) => T): T {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-decrypted-backup-"));
+  const directory = path.join(root, "backup");
+  try {
+    decryptEncryptedBackup(source, directory, passphrase);
+    return callback(directory);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+export function verifyEncryptedBackup(source: string, passphrase: string): Manifest {
+  return withDecryptedBackup(source, passphrase, verifyBackup);
+}
+
+export function restoreEncryptedBackup(source: string, dataDir: string, passphrase: string): string {
+  return withDecryptedBackup(source, passphrase, directory => restoreBackup(directory, dataDir));
+}
+
+export function drillEncryptedBackup(source: string, passphrase: string): {
+  accounts: number;
+  sessions: number;
+  inboundJobs: number;
+} {
+  return withDecryptedBackup(source, passphrase, drillBackup);
+}
+
+export function drillBackup(directory: string): {
+  accounts: number;
+  sessions: number;
+  inboundJobs: number;
+} {
+  const drillRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-restore-drill-"));
+  const restoredData = path.join(drillRoot, "data");
+  try {
+    restoreBackup(directory, restoredData);
+    const db = new DatabaseSync(path.join(restoredData, DB_NAME), { readOnly: true });
+    try {
+      checkDatabase(path.join(restoredData, DB_NAME));
+      const count = (table: string): number => {
+        const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
+        return row.count;
+      };
+      return {
+        accounts: count("wechat_accounts"),
+        sessions: count("sessions"),
+        inboundJobs: count("inbound_jobs"),
+      };
+    } finally {
+      db.close();
+    }
+  } finally {
+    fs.rmSync(drillRoot, { recursive: true, force: true });
+  }
+}
+
 export function createBackup(dataDir: string, destination: string): void {
   const source = fs.realpathSync(dataDir);
   // Parent must exist; canonicalize it to prevent symlink aliases and recursive copies.

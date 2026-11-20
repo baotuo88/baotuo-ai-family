@@ -139,8 +139,38 @@ docker compose up -d
 docker compose exec gateway node dist/apps/server/backup.js
 # 用输出中的实际路径验证，并复制到宿主机：
 docker compose exec gateway node dist/apps/server/backup.js --verify /data/backups/实际时间目录
+docker compose exec gateway node dist/apps/server/backup.js --drill /data/backups/实际时间目录
 docker compose cp gateway:/data/backups/实际时间目录 ./gateway-backup
 ```
+
+`--drill` 会把备份恢复到系统临时目录，重新校验 SQLite 并报告账号、会话和入站任务数量，演练完成后自动清除临时数据，不会改动当前数据卷。建议每次备份后执行一次；它不能替代真正的灾难恢复，但能尽早发现备份不可恢复或结构不完整。
+
+需要离线保存备份时，可使用 AES-256-GCM 加密单文件。口令不要写入命令参数；优先通过只读 secret 文件提供给一次性容器：
+
+```bash
+docker compose stop gateway
+docker compose run --rm \\
+  -e BACKUP_PASSPHRASE_FILE=/run/secrets/backup-passphrase \\
+  -v "$PWD/backup-passphrase:/run/secrets/backup-passphrase:ro" \\
+  gateway node dist/apps/server/backup.js --encrypted --out /data/backups/安全备份.enc
+docker compose up -d
+```
+
+加密备份的验证、演练和恢复需要同时带 `--encrypted`，口令可用 `BACKUP_PASSPHRASE_FILE` 或 `BACKUP_PASSPHRASE` 提供：
+
+```bash
+docker compose run --rm -e BACKUP_PASSPHRASE_FILE=/run/secrets/backup-passphrase \\
+  -v "$PWD/backup-passphrase:/run/secrets/backup-passphrase:ro" \\
+  gateway node dist/apps/server/backup.js --encrypted --verify /data/backups/安全备份.enc
+docker compose run --rm -e BACKUP_PASSPHRASE_FILE=/run/secrets/backup-passphrase \\
+  -v "$PWD/backup-passphrase:/run/secrets/backup-passphrase:ro" \\
+  gateway node dist/apps/server/backup.js --encrypted --drill /data/backups/安全备份.enc
+docker compose run --rm -e BACKUP_PASSPHRASE_FILE=/run/secrets/backup-passphrase \\
+  -v "$PWD/backup-passphrase:/run/secrets/backup-passphrase:ro" \\
+  gateway node dist/apps/server/backup.js --encrypted --restore /data/backups/安全备份.enc --yes
+```
+
+加密内容包含 SQLite、附件和文件清单；文件内容经过认证加密，备份文件中的相对路径和大小元数据仍可见。忘记口令无法恢复，口令必须与备份分开保存。恢复前仍必须停止网关。
 
 备份不包含 `.env` 和 `codex-home`，这些需要独立保管。在线备份保证 SQLite 一致性；若要求附件与数据库同一时点，先停服务，用一次性容器备份：
 
