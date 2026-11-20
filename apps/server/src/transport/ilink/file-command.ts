@@ -36,6 +36,9 @@ export async function handleFileCommand(params: {
   database: AppDatabase;
   session: SessionRecord;
   role: UserRole;
+  onDeliveryStart?: () => void;
+  onDeliveryAccepted?: () => void;
+  onDeliveryUncertain?: () => void;
 }): Promise<string> {
   if (!params.config.familyPolicy.allowFileSend) {
     return "文件发送当前已被配置关闭。";
@@ -70,13 +73,21 @@ export async function handleFileCommand(params: {
   }
 
   const caption = captionParts.join(" ").trim();
-  const result = await sendLocalFileToSession({
-    client: params.client,
-    database: params.database,
-    session: params.session,
-    filePath,
-    ...(caption ? { caption } : {}),
-  });
+  params.onDeliveryStart?.();
+  let result: Awaited<ReturnType<typeof sendLocalFileToSession>>;
+  try {
+    result = await sendLocalFileToSession({
+      client: params.client,
+      database: params.database,
+      session: params.session,
+      filePath,
+      ...(caption ? { caption } : {}),
+    });
+  } catch (error) {
+    params.onDeliveryUncertain?.();
+    throw error;
+  }
+  params.onDeliveryAccepted?.();
 
   return [
     "文件已发送。",
@@ -93,6 +104,9 @@ export async function handleAssistantFileActions(params: {
   database: AppDatabase;
   session: SessionRecord;
   role: UserRole;
+  onDeliveryStart?: () => void;
+  onDeliveryAccepted?: () => void;
+  onDeliveryUncertain?: () => void;
 }): Promise<string> {
   const action = parseAssistantFileAction(params.rawReply);
   if (!action) {
@@ -115,6 +129,9 @@ export async function handleAssistantFileActions(params: {
     database: params.database,
     session: params.session,
     role: params.role,
+    ...(params.onDeliveryStart ? { onDeliveryStart: params.onDeliveryStart } : {}),
+    ...(params.onDeliveryAccepted ? { onDeliveryAccepted: params.onDeliveryAccepted } : {}),
+    ...(params.onDeliveryUncertain ? { onDeliveryUncertain: params.onDeliveryUncertain } : {}),
   });
 
   return [action.cleanedText, fileReply].filter(Boolean).join("\n");

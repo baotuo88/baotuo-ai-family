@@ -47,6 +47,7 @@ test('job diagnostics survive restart, never expose payload and dismissal is ato
   assert.equal(detail.status, 'needs_review');
   assert.equal(detail.phase, 'executing');
   assert.equal(detail.error_code, 'interrupted_execution');
+  assert.equal(detail.delivery_status, 'not_attempted');
   assert.ok(detail.started_at);
   assert.equal(JSON.stringify(detail).includes('private-'), false);
   assert.throws(() => db.dismissInboundJob(1, ''), /note/);
@@ -56,6 +57,50 @@ test('job diagnostics survive restart, never expose payload and dismissal is ato
   assert.equal(db.getInboundJobDetail(1).resolutions.length, 1);
   assert.equal(db.getInboundJobDetail(1).resolutions[0].actor, 'management-token');
   assert.equal(db.listQueuedJobs().length, 0);
+});
+
+test('job delivery status separates accepted sends from uncertain interrupted sends', t => {
+  const db = fixture(t);
+  assert.equal(db.claimInboundJob(1), true);
+  db.setInboundJobPhase(1, 'delivering');
+  db.setInboundJobDeliveryStatus(1, 'accepted');
+  db.finishInboundJob(1, 'succeeded');
+  assert.equal(db.getInboundJobDetail(1).delivery_status, 'accepted');
+
+  db.receiveInboundBatch('account', 'next-cursor', [{ wechatAccountId: 'account', contactId: 'contact',
+    text: 'another private message', sourceMessageId: 'message-2', attachments: [], contextToken: 'private-context-token',
+    mediaSummary: '', receivedAt: new Date().toISOString() }]);
+  assert.equal(db.claimInboundJob(2), true);
+  db.setInboundJobPhase(2, 'delivering');
+  db.recoverInterruptedJobs();
+  const interrupted = db.getInboundJobDetail(2);
+  assert.equal(interrupted.status, 'needs_review');
+  assert.equal(interrupted.delivery_status, 'uncertain');
+  assert.equal(interrupted.error_code, 'delivery_uncertain');
+
+  db.receiveInboundBatch('account', 'third-cursor', [{ wechatAccountId: 'account', contactId: 'contact',
+    text: 'no reply needed', sourceMessageId: 'message-3', attachments: [], contextToken: 'private-context-token',
+    mediaSummary: '', receivedAt: new Date().toISOString() }]);
+  assert.equal(db.claimInboundJob(3), true);
+  db.finishInboundJob(3, 'succeeded');
+  assert.equal(db.getInboundJobDetail(3).delivery_status, 'not_required');
+});
+
+test('job status list selects the newest 100 before dashboard prioritization', t => {
+  const db = fixture(t);
+  assert.equal(db.claimInboundJob(1), true);
+  db.finishInboundJob(1, 'needs_review');
+  const messages = Array.from({ length: 105 }, (_, index) => ({
+    wechatAccountId: 'account', contactId: 'contact', text: `message ${index}`,
+    sourceMessageId: `message-${index + 2}`, attachments: [], contextToken: 'context',
+    mediaSummary: '', receivedAt: new Date().toISOString(),
+  }));
+  db.receiveInboundBatch('account', 'latest-cursor', messages);
+  const jobs = db.listInboundJobStatus();
+  assert.equal(jobs.length, 100);
+  assert.equal(jobs[0].id, 106);
+  assert.equal(jobs.at(-1).id, 7);
+  assert.equal(jobs.some(job => job.id === 1), false);
 });
 
 test('management job resolution requires auth, confirmation and needs_review state; replay is rejected', async t => {

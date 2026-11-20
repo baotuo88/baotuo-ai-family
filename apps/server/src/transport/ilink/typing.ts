@@ -11,6 +11,9 @@ export async function withTypingIndicator<T>(params: {
   shouldSendThinkingNotice?: () => boolean;
   buildThinkingNoticeText: (elapsedSeconds: number) => string;
   work: () => Promise<T>;
+  onDeliveryStart?: () => void;
+  onDeliveryAccepted?: () => void;
+  onDeliveryUncertain?: () => void;
 }): Promise<T> {
   let typingTicket = "";
   let refreshing = false;
@@ -74,17 +77,24 @@ export async function withTypingIndicator<T>(params: {
     sendingThinkingNotice = true;
     thinkingNoticeQueue = thinkingNoticeQueue
       .then(async () => {
-        await sendTextMessage({
-          client: params.client,
-          toUserId: params.toUserId,
-          contextToken: params.contextToken,
-          text: params.buildThinkingNoticeText(
-            Math.max(
-              1,
-              Math.round((Date.now() - thinkingStartedAt) / 1000),
+        params.onDeliveryStart?.();
+        try {
+          await sendTextMessage({
+            client: params.client,
+            toUserId: params.toUserId,
+            contextToken: params.contextToken,
+            text: params.buildThinkingNoticeText(
+              Math.max(
+                1,
+                Math.round((Date.now() - thinkingStartedAt) / 1000),
+              ),
             ),
-          ),
-        });
+          });
+          params.onDeliveryAccepted?.();
+        } catch (error) {
+          params.onDeliveryUncertain?.();
+          throw error;
+        }
       })
       .catch((error) => {
         console.warn("[worker] failed to send thinking notice", error);

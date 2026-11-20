@@ -782,6 +782,15 @@ export class WechatWorker {
     const phase = (value: "processing" | "executing" | "delivering"): void => {
       if (jobId !== undefined) this.options.database.setInboundJobPhase(jobId, value);
     };
+    const deliveryAccepted = (): void => {
+      if (jobId !== undefined) this.options.database.setInboundJobDeliveryStatus(jobId, "accepted");
+    };
+    const deliveryUncertain = (): void => {
+      if (jobId !== undefined) this.options.database.setInboundJobDeliveryStatus(jobId, "uncertain");
+    };
+    const deliveryStart = (): void => {
+      if (jobId !== undefined) this.options.database.setInboundJobPhase(jobId, "delivering");
+    };
     let executionFailed = false;
     const accountRoute = resolveRole({
       configuredRole: account.role,
@@ -904,12 +913,14 @@ export class WechatWorker {
         existingActiveTurn.controller.abort();
         await existingActiveTurn.backend?.cancel(existingActiveTurn.conversationId);
       }
+      deliveryStart();
       const clientId = await sendTextMessage({
         client,
         toUserId: inbound.contactId,
         contextToken: inbound.contextToken,
         text: reply,
       });
+      deliveryAccepted();
       this.options.database.appendMessage({
         id: buildMessageId("outbound"),
         sessionId: activeSession.id,
@@ -943,12 +954,14 @@ export class WechatWorker {
         role: route.role,
         attachments: buildInboundAttachmentAckPlaceholders(inbound.attachments),
       });
+      deliveryStart();
       const clientId = await sendTextMessage({
         client,
         toUserId: inbound.contactId,
         contextToken: inbound.contextToken,
         text: ack,
       });
+      deliveryAccepted();
       this.options.database.appendMessage({
         id: buildMessageId("outbound"),
         sessionId: activeSession.id,
@@ -1019,12 +1032,14 @@ export class WechatWorker {
           role: route.role,
           attachments: downloadedAttachments,
         });
+        deliveryStart();
         const clientId = await sendTextMessage({
           client,
           toUserId: inbound.contactId,
           contextToken: inbound.contextToken,
           text: failureAck,
         });
+        deliveryAccepted();
         this.options.database.appendMessage({
           id: buildMessageId("outbound"),
           sessionId: nextSession.id,
@@ -1110,6 +1125,9 @@ export class WechatWorker {
                 database: this.options.database,
                 session: sessionForReply,
                 role: route.role,
+                onDeliveryStart: deliveryStart,
+                onDeliveryAccepted: deliveryAccepted,
+                onDeliveryUncertain: deliveryUncertain,
               })
             : buildCommandReply({
                 command: parsedCommand,
@@ -1208,6 +1226,9 @@ export class WechatWorker {
                   route.role === "family"
                     ? filterFamilyOutput(text, this.options.config.familyPolicy)
                     : stripCodexRuntimeNoise(text),
+                onDeliveryStart: deliveryStart,
+                onDeliveryAccepted: deliveryAccepted,
+                onDeliveryUncertain: deliveryUncertain,
               })
             : undefined;
         streamingReplySender =
@@ -1221,6 +1242,9 @@ export class WechatWorker {
                 config: this.options.config,
                 maxEarlyMessages: turnMessageBudget.familyApiEarlyMessageBudget,
                 shouldSend: turnMessageBudget.tryReservePreFinalMessage,
+                onDeliveryStart: deliveryStart,
+                onDeliveryAccepted: deliveryAccepted,
+                onDeliveryUncertain: deliveryUncertain,
               })
             : undefined;
         const codexUserText =
@@ -1260,6 +1284,9 @@ export class WechatWorker {
               role: route.role,
               elapsedSeconds,
             }),
+          onDeliveryStart: deliveryStart,
+          onDeliveryAccepted: deliveryAccepted,
+          onDeliveryUncertain: deliveryUncertain,
           work: () =>
             buildCodexReply({
               backend: backendForTurn.backend,
@@ -1303,6 +1330,9 @@ export class WechatWorker {
           database: this.options.database,
           session: sessionForReply,
           role: route.role,
+          onDeliveryStart: deliveryStart,
+          onDeliveryAccepted: deliveryAccepted,
+          onDeliveryUncertain: deliveryUncertain,
         });
         codexTurnSucceeded = true;
       } catch (error) {
@@ -1359,6 +1389,7 @@ export class WechatWorker {
         }
       }
     }
+    deliveryAccepted();
 
     this.options.database.appendMessage({
       id: buildMessageId("outbound"),

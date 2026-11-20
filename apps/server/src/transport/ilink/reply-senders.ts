@@ -166,6 +166,9 @@ export function createProgressReplySender(params: {
   shouldSend?: () => boolean;
   shouldSendAt?: (params: { queuedCount: number; now: number }) => boolean;
   filterText?: (text: string) => string;
+  onDeliveryStart?: () => void;
+  onDeliveryAccepted?: () => void;
+  onDeliveryUncertain?: () => void;
 }): ProgressReplySender {
   let queue = Promise.resolve();
   let lastSentAt = 0;
@@ -199,16 +202,21 @@ export function createProgressReplySender(params: {
     queuedCount += 1;
     queuedTexts.push(text);
     queue = queue
-      .then(() =>
-        sendTextMessage({
-          client: params.client,
-          toUserId: params.toUserId,
-          contextToken: params.contextToken,
-          text,
-        }),
-      )
-      .then(() => {
-        sentTexts.push(text);
+      .then(async () => {
+        params.onDeliveryStart?.();
+        try {
+          await sendTextMessage({
+            client: params.client,
+            toUserId: params.toUserId,
+            contextToken: params.contextToken,
+            text,
+          });
+          params.onDeliveryAccepted?.();
+          sentTexts.push(text);
+        } catch (error) {
+          params.onDeliveryUncertain?.();
+          throw error;
+        }
       })
       .catch((error) => {
         console.warn("[worker] failed to send progress reply", error);
@@ -260,6 +268,9 @@ export function createFamilyApiStreamingSender(params: {
   config: AppConfig;
   maxEarlyMessages: number;
   shouldSend?: () => boolean;
+  onDeliveryStart?: () => void;
+  onDeliveryAccepted?: () => void;
+  onDeliveryUncertain?: () => void;
 }): StreamingReplySender {
   let queue = Promise.resolve();
   let buffer = "";
@@ -295,16 +306,21 @@ export function createFamilyApiStreamingSender(params: {
     queuedCount += 1;
     queuedTexts.push(cleanText);
     queue = queue
-      .then(() =>
-        sendTextMessage({
-          client: params.client,
-          toUserId: params.toUserId,
-          contextToken: params.contextToken,
-          text: cleanText,
-        }),
-      )
-      .then(() => {
-        sentTexts.push(cleanText);
+      .then(async () => {
+        params.onDeliveryStart?.();
+        try {
+          await sendTextMessage({
+            client: params.client,
+            toUserId: params.toUserId,
+            contextToken: params.contextToken,
+            text: cleanText,
+          });
+          params.onDeliveryAccepted?.();
+          sentTexts.push(cleanText);
+        } catch (error) {
+          params.onDeliveryUncertain?.();
+          throw error;
+        }
       })
       .catch((error) => {
         console.warn("[worker] failed to send family API stream chunk", error);
@@ -368,7 +384,7 @@ export function createFamilyApiStreamingSender(params: {
       maybeFlush(false);
     },
     async flush() {
-      if (queuedCount > 0) {
+      if (buffer.trim()) {
         maybeFlush(true);
       }
       await queue;

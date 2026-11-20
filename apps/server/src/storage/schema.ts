@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS inbound_jobs (
   is_control INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'queued'
     CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'needs_review')),
+  delivery_status TEXT NOT NULL DEFAULT 'not_attempted',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(wechat_account_id, source_message_id)

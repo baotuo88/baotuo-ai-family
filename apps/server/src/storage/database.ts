@@ -112,6 +112,7 @@ export class AppDatabase {
     this.ensureColumn("inbound_jobs", "contact_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("inbound_jobs", "is_control", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("inbound_jobs", "phase", "TEXT NOT NULL DEFAULT 'queued'");
+    this.ensureColumn("inbound_jobs", "delivery_status", "TEXT NOT NULL DEFAULT 'not_attempted'");
     this.ensureColumn("inbound_jobs", "error_code", "TEXT");
     this.ensureColumn("inbound_jobs", "started_at", "TEXT");
     this.ensureColumn("inbound_jobs", "finished_at", "TEXT");
@@ -187,7 +188,10 @@ export class AppDatabase {
 
   recoverInterruptedJobs(): void {
     // Execution may already have produced side effects. Never automatically replay it.
-    this.db.prepare("UPDATE inbound_jobs SET status = 'needs_review', error_code = 'interrupted_execution', updated_at = ? WHERE status = 'running'")
+    this.db.prepare(`UPDATE inbound_jobs SET status = 'needs_review',
+      error_code = CASE WHEN delivery_status = 'sending' THEN 'delivery_uncertain' ELSE 'interrupted_execution' END,
+      delivery_status = CASE WHEN delivery_status = 'sending' THEN 'uncertain' ELSE delivery_status END,
+      updated_at = ? WHERE status = 'running'`)
       .run(createNow());
   }
 
@@ -228,23 +232,39 @@ export class AppDatabase {
   }
 
   setInboundJobPhase(id: number, phase: "processing" | "executing" | "delivering"): void {
-    this.db.prepare("UPDATE inbound_jobs SET phase = ?, updated_at = ? WHERE id = ? AND status = 'running'")
-      .run(phase, createNow(), id);
+    this.db.prepare(`UPDATE inbound_jobs SET phase = ?,
+      delivery_status = CASE WHEN ? = 'delivering' AND delivery_status != 'uncertain' THEN 'sending' ELSE delivery_status END,
+      updated_at = ? WHERE id = ? AND status = 'running'`)
+      .run(phase, phase, createNow(), id);
+  }
+
+  setInboundJobDeliveryStatus(id: number, status: "accepted" | "uncertain" | "not_required"): void {
+    this.db.prepare(`UPDATE inbound_jobs SET delivery_status = ?, updated_at = ?
+      WHERE id = ? AND status = 'running' AND delivery_status != 'uncertain'`)
+      .run(status, createNow(), id);
   }
 
   finishInboundJob(id: number, status: "succeeded" | "failed" | "needs_review"): void {
     const now = createNow();
     // Persist only a fixed code, never upstream errors/prompts/credentials.
     this.db.prepare(`UPDATE inbound_jobs SET status = ?,
-      error_code = CASE WHEN ? = 'needs_review' THEN 'processing_failed' ELSE NULL END,
+      delivery_status = CASE
+        WHEN ? = 'succeeded' AND delivery_status = 'not_attempted' THEN 'not_required'
+        WHEN ? = 'needs_review' AND delivery_status IN ('sending', 'uncertain') THEN 'uncertain'
+        ELSE delivery_status END,
+      error_code = CASE
+        WHEN ? = 'needs_review' AND delivery_status IN ('sending', 'uncertain') THEN 'delivery_uncertain'
+        WHEN ? = 'needs_review' THEN 'processing_failed' ELSE NULL END,
       finished_at = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
-      .run(status, status, now, now, id);
+      .run(status, status, status, status, status, now, now, id);
   }
 
   listInboundJobStatus(): Record<string, unknown>[] {
     return this.db.prepare(`SELECT id, wechat_account_id, source_message_id, contact_id,
-      status, phase, error_code, started_at, finished_at, created_at, updated_at
-      FROM inbound_jobs ORDER BY id DESC LIMIT 100`).all();
+      status, phase, delivery_status, error_code, started_at, finished_at, created_at, updated_at
+      FROM inbound_jobs
+      ORDER BY id DESC
+      LIMIT 100`).all();
   }
 
   getJobDiagnostics(): { counts: Record<string, number>; oldestQueuedAt: string | null; oldestRunningAt: string | null } {
@@ -258,7 +278,7 @@ export class AppDatabase {
 
   getInboundJobDetail(id: number): Record<string, unknown> | undefined {
     const job = this.db.prepare(`SELECT id, wechat_account_id, source_message_id, contact_id,
-      status, phase, error_code, started_at, finished_at, created_at, updated_at
+      status, phase, delivery_status, error_code, started_at, finished_at, created_at, updated_at
       FROM inbound_jobs WHERE id = ?`).get(id);
     if (!job) return undefined;
     return { ...job, resolutions: this.db.prepare(

@@ -11,6 +11,11 @@ import { parseBuiltInCommand } from "../dist/apps/server/commands/parse-command.
 import { parseNaturalFileRequest } from "../dist/apps/server/commands/file-actions.js";
 import { sendTextMessage } from "../dist/apps/server/transport/ilink/media.js";
 import {
+  createFamilyApiStreamingSender,
+  createProgressReplySender,
+} from "../dist/apps/server/transport/ilink/reply-senders.js";
+import { loadConfig } from "../dist/apps/server/config/load-config.js";
+import {
   WECHAT_TEXT_MAX_CHARS,
   WECHAT_TEXT_MAX_UTF8_BYTES,
   splitWechatText,
@@ -68,6 +73,47 @@ test("text sender delivers every generated chunk", async () => {
   assert.ok(requests.length > 1);
   assert.equal(sentText, text);
   assert.equal(clientId, requests.at(-1).msg.client_id);
+});
+
+test("progress and streaming send failures mark delivery uncertain", async () => {
+  for (const makeSender of [
+    (client, callbacks) => createProgressReplySender({
+      client,
+      toUserId: "contact",
+      contextToken: "context",
+      includeToolProgress: false,
+      maxProgressMessages: 1,
+      minIntervalMs: 0,
+      ...callbacks,
+    }),
+    (client, callbacks) => createFamilyApiStreamingSender({
+      client,
+      toUserId: "contact",
+      contextToken: "context",
+      config: loadConfig(),
+      maxEarlyMessages: 1,
+      ...callbacks,
+    }),
+  ]) {
+    const events = [];
+    const sender = makeSender({
+      async sendMessage() {
+        throw new Error("network interrupted");
+      },
+    }, {
+      onDeliveryStart: () => events.push("sending"),
+      onDeliveryAccepted: () => events.push("accepted"),
+      onDeliveryUncertain: () => events.push("uncertain"),
+    });
+
+    if ("handleDelta" in sender) {
+      sender.handleDelta("这是一段足够长的流式回复内容，用于触发提前发送并验证发送结果不确定时的状态回调。以上是测试文本。");
+    } else {
+      sender.handle({ phase: "visible_message_run", message: "执行进度正在更新。" });
+    }
+    await sender.flush();
+    assert.deepEqual(events, ["sending", "uncertain"]);
+  }
 });
 
 test("inbound tasks stay ordered per contact and run in parallel across contacts", async () => {
