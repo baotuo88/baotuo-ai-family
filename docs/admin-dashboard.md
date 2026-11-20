@@ -27,6 +27,18 @@ ssh -N -L 18080:127.0.0.1:18080 用户@服务器
 
 然后在自己电脑打开上述网址。也可通过 HTTPS 反向代理访问，正确保留 Host，不要直接开放明文管理端口。共享令牌对应全部管理权限；退出使用后关闭专用浏览器会话，Basic 凭据由浏览器缓存，本版没有独立用户/会话注销系统。
 
+### `/admin` 返回 `management_disabled`
+
+HTTP 503 表示容器没有读到至少 32 字符的 `GATEWAY_ADMIN_TOKEN`，不是登录密码输错。用 `openssl rand -hex 32` 生成令牌，填入部署目录的 `.env`（设置了 `GATEWAY_ENV_FILE` 时则修改它指定的文件），不要添加引号。保留原有的其他配置。使用部署时相同的 Compose 参数重建服务；仅执行 `restart` 不会加载新环境变量。
+
+```bash
+docker compose up -d --force-recreate gateway
+docker compose exec -T gateway node -e 'console.log(`GATEWAY_ADMIN_TOKEN length: ${(process.env.GATEWAY_ADMIN_TOKEN ?? "").trim().length}`)'
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/admin
+```
+
+第二条命令只打印令牌长度，不输出令牌。长度应至少为 32；最后一条命令不带凭据，预期返回 `401`，此时可以在浏览器用 `admin` 和令牌登录。如果修改了宿主机端口，请替换示例中的 `18080`。
+
 ## 页面功能
 
 1. **运行概览**：队列数量、微信轮询状态、最后成功时间、连续失败次数。
