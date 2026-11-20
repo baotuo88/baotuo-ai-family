@@ -6,9 +6,12 @@ import type { RuntimeSnapshot } from "../operations/runtime-status.js";
 import http from "node:http";
 import { authorizeManagement } from "./auth.js";
 import {
+  checkManagementLoginRateLimit,
+  clearManagementLoginFailures,
   expiredManagementSessionCookie,
   isManagementAuthenticated,
   managementSessionCookie,
+  recordManagementLoginFailure,
   originMatchesRequest,
   readManagementSessionCookie,
   revokeManagementSession,
@@ -100,13 +103,26 @@ export async function routeHttpRequest(params: SettingsRoutes & {
       respondJson(context.response, 403, { ok: false, error: "cross_origin_request" });
       return;
     }
+    const rateLimit = checkManagementLoginRateLimit(context.request);
+    if (!rateLimit.allowed) {
+      context.response.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+      respondJson(context.response, 429, { ok: false, error: "login_rate_limited", message: "登录尝试过多，请稍后再试。" });
+      return;
+    }
     const body = await readJsonBody(context.request);
     const username = typeof body.username === "string" ? body.username : "";
     const token = typeof body.token === "string" ? body.token : "";
     if (username !== "admin" || !verifyManagementToken(token, context.config.server.adminToken)) {
+      const failure = recordManagementLoginFailure(context.request);
+      if (!failure.allowed) {
+        context.response.setHeader("Retry-After", String(failure.retryAfterSeconds));
+        respondJson(context.response, 429, { ok: false, error: "login_rate_limited", message: "登录尝试过多，请稍后再试。" });
+        return;
+      }
       respondJson(context.response, 401, { ok: false, error: "unauthorized", message: "用户名或管理令牌不正确。" });
       return;
     }
+    clearManagementLoginFailures(context.request);
     context.response.setHeader("Set-Cookie", managementSessionCookie(context.request, context.config.server.adminToken));
     respondJson(context.response, 200, { ok: true, next: safeLoginRedirect(body.next) });
     return;

@@ -4,9 +4,22 @@ import { respondJson } from "./response.js";
 
 export const MANAGEMENT_SESSION_COOKIE = "gateway_management_session";
 export const MANAGEMENT_SESSION_TTL_SECONDS = 12 * 60 * 60;
+export const MANAGEMENT_LOGIN_WINDOW_MS = 5 * 60 * 1000;
+export const MANAGEMENT_LOGIN_MAX_FAILURES = 8;
+export const MANAGEMENT_LOGIN_LOCKOUT_MS = 30 * 1000;
+const MANAGEMENT_LOGIN_MAX_TRACKED_CLIENTS = 4096;
 const revokedManagementSessions = new Map<string, number>();
+const managementLoginAttempts = new Map<string, {
+  windowStartedAt: number;
+  failures: number;
+  lockedUntil: number;
+  lastSeenAt: number;
+}>();
 const SESSION_REVOCATION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const LOGIN_ATTEMPT_CLEANUP_INTERVAL_MS = 30 * 1000;
 let lastRevocationCleanupAt = 0;
+let lastLoginAttemptCleanupAt = 0;
+const processSessionNonce = randomBytes(32).toString("base64url");
 
 export function createManagementSession(token: string, now = Date.now()): string {
   const issuedAt = Math.floor(now / 1000);
@@ -30,7 +43,75 @@ function validManagementSession(value: string, token: string, now = Date.now()):
 }
 
 function createManagementSessionSignature(token: string, issuedAt: number, id: string): string {
-  return createHmac("sha256", token).update(`management:${issuedAt}:${id}`).digest("base64url");
+  return createHmac("sha256", token).update(`management:${processSessionNonce}:${issuedAt}:${id}`).digest("base64url");
+}
+
+export function managementLoginClientKey(request: http.IncomingMessage): string {
+  const remoteAddress = request.socket?.remoteAddress;
+  return remoteAddress ? `ip:${remoteAddress}` : "";
+}
+
+export function checkManagementLoginRateLimit(
+  request: http.IncomingMessage,
+  now = Date.now(),
+): { allowed: boolean; retryAfterSeconds: number } {
+  const key = managementLoginClientKey(request);
+  if (!key) return { allowed: true, retryAfterSeconds: 0 };
+  pruneManagementLoginAttempts(now);
+  const attempt = managementLoginAttempts.get(key);
+  if (!attempt || attempt.lockedUntil <= now) return { allowed: true, retryAfterSeconds: 0 };
+  attempt.lastSeenAt = now;
+  return {
+    allowed: false,
+    retryAfterSeconds: Math.max(1, Math.ceil((attempt.lockedUntil - now) / 1000)),
+  };
+}
+
+export function recordManagementLoginFailure(
+  request: http.IncomingMessage,
+  now = Date.now(),
+): { allowed: boolean; retryAfterSeconds: number } {
+  const key = managementLoginClientKey(request);
+  if (!key) return { allowed: true, retryAfterSeconds: 0 };
+  pruneManagementLoginAttempts(now);
+  const current = managementLoginAttempts.get(key);
+  const attempt = !current || now - current.windowStartedAt >= MANAGEMENT_LOGIN_WINDOW_MS
+    ? { windowStartedAt: now, failures: 0, lockedUntil: 0, lastSeenAt: now }
+    : current;
+  attempt.failures += 1;
+  attempt.lastSeenAt = now;
+  if (attempt.failures >= MANAGEMENT_LOGIN_MAX_FAILURES) {
+    attempt.lockedUntil = now + MANAGEMENT_LOGIN_LOCKOUT_MS;
+  }
+  managementLoginAttempts.set(key, attempt);
+  return checkManagementLoginRateLimit(request, now);
+}
+
+export function clearManagementLoginFailures(request: http.IncomingMessage): void {
+  const key = managementLoginClientKey(request);
+  if (key) managementLoginAttempts.delete(key);
+}
+
+function pruneManagementLoginAttempts(now: number): void {
+  if (now - lastLoginAttemptCleanupAt < LOGIN_ATTEMPT_CLEANUP_INTERVAL_MS &&
+      managementLoginAttempts.size <= MANAGEMENT_LOGIN_MAX_TRACKED_CLIENTS) {
+    return;
+  }
+  lastLoginAttemptCleanupAt = now;
+  for (const [key, attempt] of managementLoginAttempts) {
+    if (now - attempt.lastSeenAt >= MANAGEMENT_LOGIN_WINDOW_MS && attempt.lockedUntil <= now) {
+      managementLoginAttempts.delete(key);
+    }
+  }
+  if (managementLoginAttempts.size <= MANAGEMENT_LOGIN_MAX_TRACKED_CLIENTS) return;
+
+  const oldest = [...managementLoginAttempts.entries()]
+    .sort(([, left], [, right]) => left.lastSeenAt - right.lastSeenAt);
+  const removeCount = managementLoginAttempts.size - MANAGEMENT_LOGIN_MAX_TRACKED_CLIENTS;
+  for (let index = 0; index < removeCount; index += 1) {
+    const entry = oldest[index];
+    if (entry) managementLoginAttempts.delete(entry[0]);
+  }
 }
 
 export function readManagementSessionCookie(request: http.IncomingMessage): string {

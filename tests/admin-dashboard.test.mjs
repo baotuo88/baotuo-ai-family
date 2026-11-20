@@ -35,6 +35,7 @@ async function call(f, method, url, body, headers = {}, override = {}) {
   const request = Readable.from(body === undefined ? [] : [JSON.stringify(body)]);
   request.method = method; request.url = url;
   request.headers = { authorization: `Bearer ${'a'.repeat(40)}`, 'content-type': 'application/json', 'x-gateway-request': 'dashboard', ...headers };
+  if (override.socket) request.socket = override.socket;
   const response = { status: 0, body: '', headers: {}, setHeader(k, v) { this.headers[k] = v; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end(body) { this.body = body; } };
   await routeHttpRequest({ ...f, request, response, loginManager: {}, startedAt: '',
     saveModelSettings: (role, value) => f.worker.saveModelSettings(role, value), ...override });
@@ -118,6 +119,25 @@ test('management login uses a standalone page and issues an expiring HttpOnly se
   assert.match(loggedOut.headers['Set-Cookie'], /Max-Age=0/);
   const denied = await call(f, 'GET', '/admin', undefined, { authorization: '', cookie });
   assert.equal(denied.status, 302);
+});
+
+test('management login rate limits repeated failures by client address', async t => {
+  const f = fixture(t);
+  const socket = { remoteAddress: '198.51.100.42' };
+  for (let attempt = 0; attempt < 7; attempt += 1) {
+    const response = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'wrong' }, { authorization: '' }, { socket });
+    assert.equal(response.status, 401);
+  }
+  const blocked = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'wrong' }, { authorization: '' }, { socket });
+  assert.equal(blocked.status, 429);
+  assert.match(blocked.headers['Retry-After'], /\d+/);
+  const validWhileBlocked = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'a'.repeat(40) }, { authorization: '' }, { socket });
+  assert.equal(validWhileBlocked.status, 429);
+
+  const otherClient = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'a'.repeat(40) }, { authorization: '' }, {
+    socket: { remoteAddress: '198.51.100.43' },
+  });
+  assert.equal(otherClient.status, 200);
 });
 
 test('model changes reject CSRF and active tasks, apply atomically when idle, and preserve keys', async t => {

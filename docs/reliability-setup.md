@@ -43,15 +43,15 @@ pnpm start
 除 `/healthz` 外所有 HTTP 路由都需要认证。令牌未配置或短于 32 字符时管理接口返回 503；无效认证返回 401。支持：
 
 - 脚本：`Authorization: Bearer <管理令牌>`；
-- 浏览器二维码页面：HTTP Basic 用户名 `admin`，密码为管理令牌。
+- 浏览器：打开 `/admin`，未登录时会进入独立管理登录页，使用用户名 `admin` 和管理令牌登录；登录后使用 HttpOnly 会话 Cookie。
 
 不支持 URL 查询参数传递令牌。HTTP 默认只监听本机；远程使用可通过 SSH 端口转发访问本机端口，或在 TLS 反向代理后部署。浏览器跨来源请求会被拒绝。
 
 ```bash
-# 使用 -u admin 交互输入密码，不将令牌放在 URL 中。
-curl -u admin http://127.0.0.1:18080/api/accounts
-curl -u admin http://127.0.0.1:18080/readyz
-curl -u admin http://127.0.0.1:18080/api/jobs
+# 脚本调用使用 Bearer 令牌；不要把令牌放在 URL 查询参数中。
+curl -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN" http://127.0.0.1:18080/api/accounts
+curl -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN" http://127.0.0.1:18080/readyz
+curl -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN" http://127.0.0.1:18080/api/jobs
 ```
 
 新接口：`GET /api/admin-contacts` 列出授权；`POST /api/admin-contacts` 接受 JSON：
