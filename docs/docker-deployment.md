@@ -71,14 +71,17 @@ docker compose exec gateway node dist/apps/server/setup.js family --force
 
 ```bash
 curl -fsS http://127.0.0.1:18080/healthz
-# Basic 用户名 admin，交互输入管理令牌作为密码。
-curl -u admin http://127.0.0.1:18080/api/accounts
-curl -u admin http://127.0.0.1:18080/api/jobs
+# 浏览器访问 /admin，使用用户名 admin 和 GATEWAY_ADMIN_TOKEN 登录。
+# 自动化客户端仍可使用 Bearer 管理令牌：
+curl -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN" http://127.0.0.1:18080/api/accounts
+curl -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN" http://127.0.0.1:18080/api/jobs
 
 docker compose exec gateway node dist/apps/server/doctor.js --env-only
 docker compose exec gateway node dist/apps/server/doctor.js --env-only --api
 docker compose exec gateway node dist/apps/server/doctor.js --env-only --acp-session
 ```
+
+未登录访问 `/admin` 会重定向到 `/admin/login`；访问管理 API 返回 HTTP 401。`management_disabled` 表示容器未读取到至少 32 字符的管理令牌。
 
 `--api`、`--acp-session` 会调用模型，可能消耗额度。Docker healthcheck 只检查 `/healthz`，不代表微信登录、模型认证或工具沙箱可用。
 

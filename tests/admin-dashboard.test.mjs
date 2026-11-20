@@ -77,7 +77,7 @@ test('settings validate URL, model, reasoning, backend and credentials without l
 test('dashboard and model endpoints are authenticated; HTML is nonce-protected and script parses', async t => {
   const f = fixture(t);
   for (const url of ['/', '/admin', '/api/settings/models', '/api/settings/models/test', '/api/contacts']) {
-    const response = await call(f, 'GET', url, undefined, { authorization: '' }); assert.equal(response.status, 401, url);
+    const response = await call(f, 'GET', url, undefined, { authorization: '' }); assert.equal(response.status, url === '/' || url === '/admin' ? 302 : 401, url);
   }
   const response = await call(f, 'GET', '/admin'); assert.equal(response.status, 200);
   assert.match(response.body, /家庭 AI · 管理后台/);
@@ -88,6 +88,36 @@ test('dashboard and model endpoints are authenticated; HTML is nonce-protected a
   assert.notEqual(renderAdminPage().csp, renderAdminPage().csp);
   assert.equal(response.body.includes('localStorage'), false);
   assert.equal(response.body.includes('innerHTML'), false);
+});
+
+test('management login uses a standalone page and issues an expiring HttpOnly session', async t => {
+  const f = fixture(t);
+  const loginPage = await call(f, 'GET', '/admin/login', undefined, { authorization: '' });
+  assert.equal(loginPage.status, 200);
+  assert.match(loginPage.body, /管理员登录/);
+  assert.match(loginPage.body, /autocomplete="current-password"/);
+
+  const invalid = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'wrong' }, { authorization: '' });
+  assert.equal(invalid.status, 401);
+  const crossOrigin = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'a'.repeat(40) }, {
+    authorization: '', origin: 'https://evil.test', host: 'localhost',
+  });
+  assert.equal(crossOrigin.status, 403);
+
+  const login = await call(f, 'POST', '/api/auth/login', { username: 'admin', token: 'a'.repeat(40), next: '//evil.test' }, { authorization: '' });
+  assert.equal(login.status, 200);
+  assert.equal(JSON.parse(login.body).next, '/admin');
+  assert.match(login.headers['Set-Cookie'], /HttpOnly/);
+  assert.match(login.headers['Set-Cookie'], /SameSite=Strict/);
+  const cookie = login.headers['Set-Cookie'].split(';', 1)[0];
+
+  const dashboard = await call(f, 'GET', '/admin', undefined, { authorization: '', cookie });
+  assert.equal(dashboard.status, 200);
+  const loggedOut = await call(f, 'POST', '/api/auth/logout', {}, { authorization: '', cookie });
+  assert.equal(loggedOut.status, 200);
+  assert.match(loggedOut.headers['Set-Cookie'], /Max-Age=0/);
+  const denied = await call(f, 'GET', '/admin', undefined, { authorization: '', cookie });
+  assert.equal(denied.status, 302);
 });
 
 test('model changes reject CSRF and active tasks, apply atomically when idle, and preserve keys', async t => {

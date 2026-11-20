@@ -13,23 +13,25 @@ export function renderAdminPage(): { html: string; csp: string } {
 body{background:var(--paper);color:var(--ink);min-height:100vh}
 header{position:relative;padding:26px max(22px,calc((100vw - 1240px)/2));background:#173a43;border-bottom:1px solid #2c545b;box-shadow:0 8px 24px rgba(24,50,58,.14)}
 header:after{content:"";position:absolute;inset:auto 0 0;height:3px;background:#4bb79d}
-header>div{display:flex;align-items:center;gap:14px}header>div:before{content:"B";display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.28);border-radius:12px;background:#23525a;color:#b8f0dd;font-weight:800;font-size:19px;letter-spacing:0}
+header>div{display:flex;align-items:center;gap:14px}header>div:before{content:"B";display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.28);border-radius:12px;background:#23525a;color:#b8f0dd;font-weight:800;font-size:19px;letter-spacing:0}.header-actions{display:flex;align-items:center;gap:8px}
 h1{font-size:21px;letter-spacing:0;margin:0 0 4px}header p{color:#b8d2d0}
 header button{border-color:rgba(255,255,255,.26);background:rgba(255,255,255,.1);color:#fff}header button:hover{border-color:#9be1ce;background:rgba(255,255,255,.16)}
 main{max-width:1240px;padding:28px 22px 64px}
 nav{gap:6px;margin:0 0 24px;padding:5px;border:1px solid var(--line);border-radius:12px;background:#e9efec;box-shadow:0 4px 14px rgba(24,50,58,.04)}
 nav button{border-color:transparent;background:transparent;color:var(--ink-soft);font-weight:650;padding:10px 16px}nav button:hover{border-color:transparent;background:#f8fbfa;color:var(--ink)}nav button[aria-selected=true]{background:var(--surface);color:var(--teal-dark);border-color:var(--line);box-shadow:0 2px 6px rgba(24,50,58,.08)}
 .tab{animation:show-tab .18s ease-out}@keyframes show-tab{from{opacity:.35;transform:translateY(3px)}to{opacity:1;transform:none}}
-.card{border-color:var(--line);border-radius:14px;padding:24px;margin-bottom:18px;box-shadow:var(--shadow)}.card>h2{color:var(--ink);letter-spacing:0}.card>h2:after{content:"";display:block;width:28px;height:3px;margin-top:10px;border-radius:99px;background:#4bb79d}
+.card{border-color:var(--line);border-radius:8px;padding:24px;margin-bottom:18px;box-shadow:var(--shadow)}.card>h2{color:var(--ink);letter-spacing:0}.card>h2:after{content:"";display:block;width:28px;height:3px;margin-top:10px;border-radius:99px;background:#4bb79d}
+#overview,#accounts{display:grid;gap:18px;align-items:start}#overview{grid-template-columns:minmax(280px,.78fr) minmax(0,1.22fr)}#accounts{grid-template-columns:minmax(0,1.04fr) minmax(0,.96fr)}#overview>.card,#accounts>.card{margin-bottom:0}#models .card,#jobs .card{max-width:1120px}
 .muted{color:var(--ink-soft)}p{line-height:1.7}.notice{border:1px solid #b8ded4;border-left:4px solid var(--teal);border-radius:10px;background:var(--teal-soft);box-shadow:0 5px 16px rgba(15,118,110,.06)}.notice.error{border-color:#ecc4c0;border-left-color:var(--red);background:#fff0ee}
-.stats{gap:14px}.stat{border:1px solid var(--line);border-radius:12px;background:#f7faf8;padding:17px}.stat strong{color:var(--teal-dark);font-size:27px;letter-spacing:0}.stat span{color:var(--ink-soft)}
-label{color:#36535a;font-size:13px;letter-spacing:.01em}input,select,textarea{border-color:#c8d8d4;border-radius:9px;padding:11px 12px;transition:border-color .15s,box-shadow .15s}input:focus,select:focus,textarea:focus{outline:0;border-color:#54aa98;box-shadow:0 0 0 3px rgba(75,183,157,.18)}
+.stats{gap:14px}.stat{border:1px solid var(--line);border-radius:8px;background:#f7faf8;padding:17px}.stat strong{color:var(--teal-dark);font-size:27px;letter-spacing:0}.stat span{color:var(--ink-soft)}
+label{color:#36535a;font-size:13px;letter-spacing:0}input,select,textarea{border-color:#c8d8d4;border-radius:8px;padding:11px 12px;transition:border-color .15s,box-shadow .15s}input:focus,select:focus,textarea:focus{outline:0;border-color:#54aa98;box-shadow:0 0 0 3px rgba(75,183,157,.18)}
 button{border-color:#c5d5d1;border-radius:9px;transition:background .15s,border-color .15s,transform .15s,box-shadow .15s}button:hover:not(:disabled){border-color:#70b7a5;box-shadow:0 3px 8px rgba(24,50,58,.08);transform:translateY(-1px)}button:focus-visible{outline:3px solid rgba(75,183,157,.35);outline-offset:2px}.primary{background:var(--teal);border-color:var(--teal)}.primary:hover:not(:disabled){background:var(--teal-dark);border-color:var(--teal-dark)}
-.actions{margin-top:20px}.table-wrap{border:1px solid var(--line);border-radius:11px;background:#fff}table{font-size:13px}th,td{padding:13px 14px}th{background:#f6f9f7;color:#567078;font-size:12px;letter-spacing:.04em;text-transform:uppercase}tr:last-child td{border-bottom:0}td button{background:#fff}
-pre{border:1px solid var(--line);background:#f6f9f7;border-radius:11px}#qr{width:272px;padding:12px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(24,50,58,.08)}footer{color:#70848a;border-top:1px solid var(--line);padding-top:20px}
-@media(max-width:650px){header{padding:20px 16px}header>div{align-items:flex-start}header>div:before{width:34px;height:34px;border-radius:10px;font-size:16px}h1{font-size:19px}main{padding:20px 12px 48px}nav{overflow:auto;flex-wrap:nowrap}nav button{white-space:nowrap;padding:9px 13px}.card{padding:18px;border-radius:12px}.stats{gap:9px}.stat{padding:13px}.stat strong{font-size:22px}.table-wrap{margin-left:-2px;margin-right:-2px}}
+.actions{margin-top:20px}.table-wrap{border:1px solid var(--line);border-radius:8px;background:#fff}table{font-size:13px}th,td{padding:13px 14px}th{background:#f6f9f7;color:#567078;font-size:12px;letter-spacing:0;text-transform:uppercase}tr:last-child td{border-bottom:0}td button{background:#fff}
+pre{border:1px solid var(--line);background:#f6f9f7;border-radius:8px}#qr{width:272px;padding:12px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 8px 24px rgba(24,50,58,.08)}footer{color:#70848a;border-top:1px solid var(--line);padding-top:20px}
+@media(max-width:820px){#overview,#accounts{grid-template-columns:1fr}#overview>.card,#accounts>.card{margin-bottom:0}}
+@media(max-width:650px){header{padding:20px 16px}header>div{align-items:flex-start}.header-actions{gap:5px;align-self:flex-start;flex-wrap:wrap;justify-content:flex-end}header>div:before{width:34px;height:34px;border-radius:10px;font-size:16px}h1{font-size:19px}main{padding:20px 12px 48px}nav{overflow:auto;flex-wrap:nowrap}nav button{white-space:nowrap;padding:9px 13px}.card{padding:18px}.stats{gap:9px}.stat{padding:13px}.table-wrap{margin-left:-2px;margin-right:-2px}}
 </style></head><body>
-<header><div><h1>家庭 AI · 管理后台</h1><p>微信接入、模型配置与运行诊断</p></div><button id="refresh">↻&nbsp; 刷新状态</button></header>
+<header><div><h1>家庭 AI · 管理后台</h1><p>微信接入、模型配置与运行诊断</p></div><span class="header-actions"><button id="refresh">↻&nbsp; 刷新状态</button><button id="logout">退出登录</button></span></header>
 <main><div id="message" class="notice" role="status" aria-live="polite" hidden></div>
 <nav aria-label="管理导航"><button data-tab="overview" aria-selected="true">运行概览</button><button data-tab="models">模型设置</button><button data-tab="accounts">微信与权限</button><button data-tab="jobs">任务管理</button></nav>
 <section id="overview" class="tab"><div class="card"><h2>开始使用</h2><p>① 配置模型并测试连接 → ② 扫码绑定微信 → ③ 按需授权管理员联系人。</p><p class="muted">后台已通过管理令牌认证。无需在浏览器保存 Key；查看模型设置时不会回显已有密钥。</p><button class="primary" id="start">配置模型</button></div><div class="card"><h2>运行状态</h2><div id="stats" class="stats"></div><p id="readiness" class="muted">加载中…</p><div id="polls" class="table-wrap"></div></div></section>
@@ -38,7 +40,7 @@ pre{border:1px solid var(--line);background:#f6f9f7;border-radius:11px}#qr{width
 <section id="accounts" class="tab" hidden><div class="card"><h2>微信账号</h2><div class="actions"><select id="login-role" aria-label="新账号角色"><option value="family">家庭用户 family</option><option value="admin">管理员 admin</option></select><button class="primary" id="new-login">添加账号 / 获取二维码</button></div><div id="login-panel" hidden><img id="qr" alt="微信登录二维码"><p id="login-status" role="status"></p></div><div id="account-list" class="table-wrap"></div></div>
 <div class="card"><h2>管理员联系人授权</h2><p class="muted">只有 admin 账号 + 已授权联系人同时满足，才获得管理员能力。先向机器人发送 /whoami 获取 ID，也可从最近联系人列表选择。</p><form id="grant-form"><div class="grid"><div><label for="grant-account">账号</label><select id="grant-account" required></select></div><div><label for="grant-contact">联系人 ID</label><input id="grant-contact" required></div></div><div class="actions"><button class="primary" type="submit">确认授权</button></div></form><h3>已授权</h3><div id="grants" class="table-wrap"></div><h3>最近联系人（最多 200 条）</h3><div id="contacts" class="table-wrap"></div></div></section>
 <section id="jobs" class="tab" hidden><div class="card"><h2>任务管理</h2><p class="muted">显示最近 100 条任务。中断/失败任务可能已有副作用，人工核实后才能关闭；不自动重跑。</p><div id="job-list" class="table-wrap"></div><h3>任务详情</h3><pre id="job-detail">选择任务查看详情（不包含聊天正文和凭据）。</pre></div></section>
-<footer>管理端默认仅允许本机访问。远程管理请使用 SSH 隧道或 HTTPS 反向代理，不要直接公开 HTTP 端口。浏览器使用 Basic 登录，用户名 admin；结束管理后关闭专用浏览器会话。</footer></main>
+<footer>管理端默认仅允许本机访问。远程管理请使用 SSH 隧道或 HTTPS 反向代理，不要直接公开 HTTP 端口。管理会话 12 小时后过期，结束管理后请主动退出。</footer></main>
 <script nonce="${nonce}">${ADMIN_SCRIPT}</script></body></html>`,
   };
 }
@@ -155,5 +157,6 @@ async function jobs() {
 }
 async function load(id) { if (id === 'overview') await overview(); if (id === 'models') { models = await api('/api/settings/models'); fillModel(); } if (id === 'accounts') await accounts(); if (id === 'jobs') await jobs(); }
 $('refresh').onclick = () => action($('refresh'), () => load(document.querySelector('[aria-selected=true]').dataset.tab));
+$('logout').onclick = () => action($('logout'), async () => { await api('/api/auth/logout', {}); location.assign('/admin/login'); });
 overview().catch(error => notice(error.message, true));
 `;

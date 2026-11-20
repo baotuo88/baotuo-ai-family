@@ -5,8 +5,18 @@ import { handleJobRoutes } from "./jobs.js";
 import type { RuntimeSnapshot } from "../operations/runtime-status.js";
 import http from "node:http";
 import { authorizeManagement } from "./auth.js";
+import {
+  expiredManagementSessionCookie,
+  isManagementAuthenticated,
+  managementSessionCookie,
+  originMatchesRequest,
+  readManagementSessionCookie,
+  revokeManagementSession,
+  verifyManagementToken,
+} from "./auth.js";
 import { AppConfig } from "../config/types.js";
 import { renderLoginPage } from "../login-page.js";
+import { renderManagementLoginPage } from "./management-login-page.js";
 import { formatBeijingTime } from "../sessions/index.js";
 import { AppDatabase } from "../storage/index.js";
 import { isUserRole, sanitizeAccountRecord } from "./accounts.js";
@@ -70,8 +80,53 @@ export async function routeHttpRequest(params: SettingsRoutes & {
     segments: requestUrl.pathname.split("/").filter(Boolean),
   };
 
-  if (context.pathname !== "/healthz" &&
+  if (context.pathname === "/admin/login" && context.method === "GET") {
+    const page = renderManagementLoginPage(context.config.server.adminToken.length < 32
+      ? "管理后台尚未启用，请先配置至少 32 位的 GATEWAY_ADMIN_TOKEN。"
+      : "");
+    context.response.setHeader("Content-Security-Policy", page.csp);
+    context.response.setHeader("X-Content-Type-Options", "nosniff");
+    context.response.setHeader("Referrer-Policy", "no-referrer");
+    respondHtml(context.response, 200, page.html);
+    return;
+  }
+
+  if (context.pathname === "/api/auth/login" && context.method === "POST") {
+    if (context.config.server.adminToken.length < 32) {
+      respondJson(context.response, 503, { ok: false, error: "management_disabled", message: "管理后台尚未启用，请配置 GATEWAY_ADMIN_TOKEN。" });
+      return;
+    }
+    if (!originMatchesRequest(context.request)) {
+      respondJson(context.response, 403, { ok: false, error: "cross_origin_request" });
+      return;
+    }
+    const body = await readJsonBody(context.request);
+    const username = typeof body.username === "string" ? body.username : "";
+    const token = typeof body.token === "string" ? body.token : "";
+    if (username !== "admin" || !verifyManagementToken(token, context.config.server.adminToken)) {
+      respondJson(context.response, 401, { ok: false, error: "unauthorized", message: "用户名或管理令牌不正确。" });
+      return;
+    }
+    context.response.setHeader("Set-Cookie", managementSessionCookie(context.request, context.config.server.adminToken));
+    respondJson(context.response, 200, { ok: true, next: safeLoginRedirect(body.next) });
+    return;
+  }
+
+  const isDashboardPage = (context.pathname === "/" || context.pathname === "/admin") && context.method === "GET";
+  if (context.pathname !== "/healthz" && isDashboardPage && !isManagementAuthenticated(context.request, context.config.server.adminToken)) {
+    const next = encodeURIComponent(context.pathname);
+    context.response.writeHead(302, { Location: `/admin/login?next=${next}`, "Cache-Control": "no-store" });
+    context.response.end();
+    return;
+  }
+  if (context.pathname !== "/healthz" && !isDashboardPage &&
       !authorizeManagement(context.request, context.response, context.config.server.adminToken)) {
+    return;
+  }
+  if (context.pathname === "/api/auth/logout" && context.method === "POST") {
+    revokeManagementSession(readManagementSessionCookie(context.request));
+    context.response.setHeader("Set-Cookie", expiredManagementSessionCookie());
+    respondJson(context.response, 200, { ok: true });
     return;
   }
 
@@ -136,6 +191,11 @@ export async function routeHttpRequest(params: SettingsRoutes & {
     error: "not_found",
     path: context.pathname,
   });
+}
+
+function safeLoginRedirect(value: unknown): string {
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) return "/admin";
+  return value;
 }
 
 async function handleHealthRoutes(
