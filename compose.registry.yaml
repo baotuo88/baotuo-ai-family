@@ -1,0 +1,8 @@
+# Compatibility override for older deployment commands. Default compose.yaml now pulls GHCR.
+# Use with: docker compose -f compose.yaml -f compose.registry.yaml up -d
+# Requires Compose 2.30+ (same as the base configuration).
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:-ghcr.io/baotuo88/baotuo-ai-family:latest}
+    build: !reset null
+    pull_policy: always

@@ -1,0 +1,17 @@
+[Unit]
+Description=baotuo-ai-family
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/baotuo-ai-family
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/baotuo-ai-family/.env
+ExecStart=/usr/bin/env node dist/apps/server/index.js
+Restart=always
+RestartSec=5
+User=weixin-agent
+Group=weixin-agent
+
+[Install]
+WantedBy=multi-user.target

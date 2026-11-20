@@ -1,0 +1,142 @@
+diff --git a/dist/index.js b/dist/index.js
+index 58ec2616386c0c48e8da8c30fb11cc95b270017d..65def8c8e7b3bbd149f1eba0f755b86532eb2bb0 100755
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -28338,9 +28338,10 @@ var CodexAcpClient = class {
+   }
+   async resumeSession(request, onSubscribed) {
+     const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
++    const readOnlyDirectories = readMetaReadOnlyDirectories(request._meta);
+     await this.refreshSkills(request.cwd, additionalDirectories);
+     const response = await this.codexClient.threadResume({
+-      config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
++      config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? [], readOnlyDirectories),
+       cwd: request.cwd,
+       modelProvider: await this.getResumeModelProvider(),
+       threadId: request.sessionId
+@@ -28360,10 +28361,11 @@ var CodexAcpClient = class {
+   }
+   async forkSession(request) {
+     const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
++    const readOnlyDirectories = readMetaReadOnlyDirectories(request._meta);
+     return await forkSession(request, additionalDirectories, {
+       codexClient: this.codexClient,
+       refreshSkills: (cwd, directories) => this.refreshSkills(cwd, directories),
+-      createSessionConfig: (cwd, directories, mcpServers) => this.createSessionConfig(cwd, directories, mcpServers),
++      createSessionConfig: (cwd, directories, mcpServers) => this.createSessionConfig(cwd, directories, mcpServers, readOnlyDirectories),
+       getResumeModelProvider: () => this.getResumeModelProvider(),
+       fetchAvailableModels: () => this.fetchAvailableModels(),
+       createCurrentModelId: (models, model, reasoningEffort) => this.createModelId(models, model, reasoningEffort).toString(),
+@@ -28372,9 +28374,10 @@ var CodexAcpClient = class {
+   }
+   async loadSession(request, onSubscribed) {
+     const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
++    const readOnlyDirectories = readMetaReadOnlyDirectories(request._meta);
+     await this.refreshSkills(request.cwd, additionalDirectories);
+     const response = await this.codexClient.threadResume({
+-      config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
++      config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? [], readOnlyDirectories),
+       cwd: request.cwd,
+       modelProvider: await this.getResumeModelProvider(),
+       threadId: request.sessionId
+@@ -28405,9 +28408,11 @@ var CodexAcpClient = class {
+   }
+   async newSession(request) {
+     const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
++    const readOnlyDirectories = readMetaReadOnlyDirectories(request._meta);
+     await this.refreshSkills(request.cwd, additionalDirectories);
+     const response = await this.codexClient.threadStart({
+-      config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
++      config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers, readOnlyDirectories),
++      ...process.env["CODEX_ACP_PERMISSION_PROFILE"] === "weixin_family" ? { ephemeral: true } : {},
+       modelProvider: this.getModelProvider(),
+       cwd: request.cwd
+     });
+@@ -28497,7 +28502,7 @@ var CodexAcpClient = class {
+   getMcpServerStartupVersion() {
+     return this.codexClient.getMcpServerStartupVersion();
+   }
+-  async createSessionConfig(projectPath, additionalDirectories, mcpServers) {
++  async createSessionConfig(projectPath, additionalDirectories, mcpServers, readOnlyDirectories) {
+     const sessionRoots = [projectPath, ...additionalDirectories];
+     const activeProvider = this.gatewayConfig ? {
+       apiType: gatewayApiTypeFromConfig(this.gatewayConfig),
+@@ -28516,7 +28521,7 @@ var CodexAcpClient = class {
+         trust_level: "trusted"
+       }]))
+     };
+-    const configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots(mergedConfig, additionalDirectories);
++    const configWithWorkspaceRoots = mergeSandboxWorkspaceWriteRoots(mergedConfig, additionalDirectories, readOnlyDirectories);
+     if (mcpServers.length === 0) {
+       return configWithWorkspaceRoots;
+     }
+@@ -28664,7 +28669,9 @@ var CodexAcpClient = class {
+       input,
+       approvalPolicy: agentMode.approvalPolicy,
+       approvalsReviewer: agentMode.approvalsReviewer,
+-      sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(agentMode.sandboxPolicy, additionalDirectories),
++      ...process.env["CODEX_ACP_PERMISSION_PROFILE"] === "weixin_family" ? {} : {
++        sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(agentMode.sandboxPolicy, additionalDirectories)
++      },
+       summary: disableSummary ? "none" : "auto",
+       effort,
+       model: modelId.model,
+@@ -29073,10 +29080,57 @@ function readAdditionalDirectories(cwd, additionalDirectories, meta3) {
+   }
+   return directories;
+ }
+-function mergeSandboxWorkspaceWriteRoots(config2, roots) {
++function readMetaReadOnlyDirectories(meta3) {
++  const gatewayMeta = meta3?.["weixin-household-gateway"];
++  const rawDirectories = isJsonObject(gatewayMeta) ? gatewayMeta["readOnlyDirectories"] : null;
++  if (!Array.isArray(rawDirectories)) {
++    return [];
++  }
++  return uniqueStrings(rawDirectories.filter((value) => typeof value === "string" && path7.isAbsolute(value)));
++}
++function mergeSandboxWorkspaceWriteRoots(config2, roots, readOnlyRoots = []) {
+   if (roots.length === 0) {
+     return config2;
+   }
++  const permissionProfileName = process.env["CODEX_ACP_PERMISSION_PROFILE"] === "weixin_family" ? "weixin_family" : void 0;
++  const configuredPermissions = isJsonObject(config2["permissions"]) ? config2["permissions"] : {};
++  const configuredProfile = permissionProfileName && isJsonObject(configuredPermissions[permissionProfileName]) ? configuredPermissions[permissionProfileName] : null;
++  if (permissionProfileName && config2["default_permissions"] === permissionProfileName && configuredProfile) {
++    const existingWorkspaceRoots = isJsonObject(configuredProfile["workspace_roots"]) ? configuredProfile["workspace_roots"] : {};
++    const existingFilesystem = isJsonObject(configuredProfile["filesystem"]) ? configuredProfile["filesystem"] : {};
++    const readOnlyRootSet = new Set(readOnlyRoots);
++    const writableRoots = roots.filter((root) => !readOnlyRootSet.has(root));
++    const conflictingRoot = writableRoots.find((writableRoot) => readOnlyRoots.some((readOnlyRoot) => {
++      if (path7.dirname(writableRoot) === path7.dirname(readOnlyRoot)) {
++        return true;
++      }
++      const writableRelative = path7.relative(writableRoot, readOnlyRoot);
++      const readOnlyRelative = path7.relative(readOnlyRoot, writableRoot);
++      return writableRelative === "" || !writableRelative.startsWith(".." + path7.sep) && writableRelative !== ".." && !path7.isAbsolute(writableRelative) || !readOnlyRelative.startsWith(".." + path7.sep) && readOnlyRelative !== ".." && !path7.isAbsolute(readOnlyRelative);
++    }));
++    if (conflictingRoot) {
++      throw new Error("Family ACP read-only and writable roots must use separate, non-overlapping parent directories");
++    }
++    const writableParentRules = Object.fromEntries(uniqueStrings(writableRoots.map((root) => path7.dirname(root)).filter((parent) => parent !== path7.parse(parent).root)).map((parent) => [parent, "deny"]));
++    return {
++      ...config2,
++      permissions: {
++        ...configuredPermissions,
++        [permissionProfileName]: {
++          ...configuredProfile,
++          filesystem: {
++            ...existingFilesystem,
++            ...writableParentRules,
++            ...Object.fromEntries(roots.map((root) => [root, readOnlyRootSet.has(root) ? "read" : "write"]))
++          },
++          workspace_roots: {
++            ...existingWorkspaceRoots,
++            ...Object.fromEntries(roots.map((root) => [root, true]))
++          }
++        }
++      }
++    };
++  }
+   const existingSandboxConfig = isJsonObject(config2["sandbox_workspace_write"]) ? config2["sandbox_workspace_write"] : {};
+   const existingWritableRoots = Array.isArray(existingSandboxConfig["writable_roots"]) ? existingSandboxConfig["writable_roots"].filter((value) => typeof value === "string") : [];
+   return {

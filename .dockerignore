@@ -1,0 +1,30 @@
+# Only explicitly required build inputs may enter the Docker build context.
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!patches/
+!patches/**
+!apps/
+!apps/server/
+!apps/server/tsconfig.json
+!apps/server/src/
+!apps/server/src/**
+!prompts/
+!prompts/**
+!scripts/
+!scripts/**
+!tests/
+!tests/**
+!infra/
+!infra/docker/
+!infra/docker/**
+# Keep secrets excluded even if a future input directory contains them.
+**/.env*
+**/auth.json
+**/*.sqlite*
+**/*.db
+**/node_modules/**

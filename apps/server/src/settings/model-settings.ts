@@ -1,0 +1,119 @@
+import fs from "node:fs";
+import path from "node:path";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import type { AppConfig, CodexRuntimeConfig, CodexReasoningEffort, UserRole } from "../config/types.js";
+import { isCodexReasoningEffort, isCodexModelReasoningEffortSupported } from "../config/reasoning.js";
+
+export interface ModelSettings {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  reasoningEffort: CodexReasoningEffort;
+  backend: "api" | "acp";
+}
+export type ModelSettingsMap = Partial<Record<UserRole, ModelSettings>>;
+export class SettingsInputError extends Error {}
+export class SettingsBusyError extends Error {}
+
+function validate(input: Record<string, unknown>, previous?: ModelSettings): ModelSettings {
+  const text = (name: string, max: number): string => {
+    const value = input[name];
+    if (typeof value !== "string" || !value.trim() || value.length > max || /[\r\n\0]/.test(value)) {
+      throw new SettingsInputError(`Invalid ${name}`);
+    }
+    return value.trim();
+  };
+  const baseUrl = text("baseUrl", 2048);
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { throw new SettingsInputError("Invalid baseUrl"); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new SettingsInputError("API 地址仅支持无凭据、查询参数和片段的 HTTP(S) URL");
+  }
+  const model = text("model", 200);
+  const reasoningEffort = text("reasoningEffort", 20);
+  if (!isCodexReasoningEffort(reasoningEffort) || !isCodexModelReasoningEffortSupported(model, reasoningEffort)) {
+    throw new SettingsInputError("模型与思考强度不兼容");
+  }
+  if (input.backend !== 'api' && input.backend !== 'acp') throw new SettingsInputError("Invalid backend");
+  const apiKey = input.apiKey === undefined || input.apiKey === ""
+    ? previous?.apiKey : text("apiKey", 8192);
+  if (!apiKey) throw new SettingsInputError("首次保存必须填写 API Key；留空仅保留已有 Key");
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), model, apiKey, reasoningEffort, backend: input.backend };
+}
+
+export function applyModelSettings(base: CodexRuntimeConfig, settings: ModelSettings): CodexRuntimeConfig {
+  return { ...base, backend: settings.backend, apiBaseUrl: settings.baseUrl, apiKey: settings.apiKey,
+    apiModel: settings.model, acpAuthMode: 'env',
+    roleOverrides: { model: settings.model, reasoningEffort: settings.reasoningEffort },
+    envOverrides: { ...base.envOverrides,
+      CODEX_CLI_API_KEY: settings.apiKey, OPENAI_API_KEY: settings.apiKey, CODEX_API_KEY: settings.apiKey,
+      CODEX_CLI_BASE_URL: settings.baseUrl, CODEX_API_BASE_URL: settings.baseUrl,
+    } };
+}
+
+/** Only this module handles encryption and key-preserving updates. Public views never contain keys. */
+export class ModelSettingsStore {
+  private current: ModelSettingsMap = {};
+  private readonly directory: string;
+  private readonly file: string;
+  private readonly keyFile: string;
+  constructor(dataDir: string, private readonly config: AppConfig) {
+    this.directory = path.join(dataDir, '.settings');
+    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    if (fs.lstatSync(this.directory).isSymbolicLink()) throw new Error('Settings directory must not be a symlink');
+    if (process.platform !== 'win32') fs.chmodSync(this.directory, 0o700);
+    this.file = path.join(this.directory, 'models.enc');
+    this.keyFile = path.join(this.directory, 'key');
+    for (const file of [this.file, this.keyFile]) {
+      if (fs.existsSync(file)) {
+        if (!fs.lstatSync(file).isFile()) throw new Error('Invalid settings file');
+        if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+      }
+    }
+    if (fs.existsSync(this.file)) {
+      try {
+        const encrypted = fs.readFileSync(this.file);
+        const decipher = createDecipheriv('aes-256-gcm', fs.readFileSync(this.keyFile), encrypted.subarray(0, 12));
+        decipher.setAuthTag(encrypted.subarray(12, 28));
+        const parsed = JSON.parse(Buffer.concat([decipher.update(encrypted.subarray(28)), decipher.final()]).toString('utf8'));
+        for (const role of ['admin', 'family'] as const) if (parsed[role]) this.current[role] = validate(parsed[role]);
+      } catch { throw new Error('Cannot read model settings; restore .settings and its key together'); }
+    }
+  }
+  get(role: UserRole): ModelSettings | undefined {
+    const value = this.current[role];
+    return value ? { ...value } : undefined;
+  }
+  view() {
+    const roles = Object.fromEntries((['admin', 'family'] as const).map(role => {
+      const saved = this.current[role];
+      const base = this.config.codex[role];
+      return [role, { baseUrl: saved?.baseUrl ?? base.apiBaseUrl ?? '', model: saved?.model ?? base.apiModel,
+        reasoningEffort: saved?.reasoningEffort ?? base.roleOverrides?.reasoningEffort ?? 'high',
+        backend: saved?.backend ?? base.backend, hasApiKey: Boolean(saved?.apiKey ?? base.apiKey),
+        source: saved ? 'dashboard' : 'environment' }];
+    }));
+    return { roles, precedence: 'dashboard > environment/WeChat model and provider overrides for configured roles' };
+  }
+  prepare(role: UserRole, body: Record<string, unknown>): ModelSettings {
+    const base = this.config.codex[role];
+    const previous = this.current[role] ?? (base.apiKey ? {
+      baseUrl: base.apiBaseUrl ?? '', apiKey: base.apiKey, model: base.apiModel,
+      reasoningEffort: base.roleOverrides?.reasoningEffort ?? 'high', backend: base.backend === 'api' ? 'api' : 'acp',
+    } as ModelSettings : undefined);
+    return validate(body, previous);
+  }
+  save(role: UserRole, settings: ModelSettings): void {
+    const next = { ...this.current, [role]: settings };
+    if (!fs.existsSync(this.keyFile)) fs.writeFileSync(this.keyFile, randomBytes(32), { flag: 'wx', mode: 0o600 });
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', fs.readFileSync(this.keyFile), iv);
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(next), 'utf8'), cipher.final()]);
+    const temporary = `${this.file}.${randomBytes(8).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(temporary, Buffer.concat([iv, cipher.getAuthTag(), encrypted]), { flag: 'wx', mode: 0o600 });
+      fs.renameSync(temporary, this.file);
+      this.current = next;
+    } finally { fs.rmSync(temporary, { force: true }); }
+  }
+}

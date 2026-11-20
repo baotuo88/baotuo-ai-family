@@ -1,0 +1,134 @@
+name: Container image
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Build, test and smoke check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: gateway-ci:test
+          cache-from: type=gha,scope=gateway-amd64
+          cache-to: type=gha,mode=max,scope=gateway-amd64
+      - name: Check fresh-volume startup and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="gateway-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          volume="${container}-data"
+          cleanup() {
+            docker logs "$container" || true
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume"
+          docker run -d --name "$container" --init \
+            --mount "type=volume,source=$volume,target=/data" \
+            gateway-ci:test
+          healthy=false
+          for attempt in $(seq 1 30); do
+            state="$(docker inspect --format '{{.State.Status}}' "$container")"
+            if [ "$state" != running ]; then
+              echo "Container stopped before becoming healthy: $state" >&2
+              exit 1
+            fi
+            if docker exec "$container" node /usr/local/lib/gateway-healthcheck.cjs; then
+              healthy=true
+              break
+            fi
+            sleep 2
+          done
+          test "$healthy" = true
+          test "$(docker exec "$container" id -u)" = 1000
+          docker exec "$container" node_modules/.bin/codex --version
+          docker stop --time 30 "$container"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+
+  publish:
+    name: Publish AMD64 and ARM64 image
+    needs: verify
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set lowercase registry image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=tag
+            type=sha,format=long,prefix=sha-
+      - name: Build and publish
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: |
+            type=gha,scope=gateway-amd64
+            type=gha,scope=gateway-multiarch
+          cache-to: type=gha,mode=max,scope=gateway-multiarch
+          provenance: mode=min
+          sbom: true
+      - name: Publish image location in run summary
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          printf 'Published image: `%s@%s`\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nPin this digest in GATEWAY_IMAGE for reproducible deployments.\n' >> "$GITHUB_STEP_SUMMARY"

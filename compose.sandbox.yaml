@@ -1,0 +1,8 @@
+# Opt-in fallback ONLY if the host's Docker security profile blocks bubblewrap.
+# This relaxes the outer container filters. It does not disable family permissions,
+# grant privileged mode, mount the host filesystem, or add the Docker socket.
+services:
+  gateway:
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
