@@ -1,6 +1,7 @@
 import { applyModelSettings, ModelSettingsStore, SettingsBusyError, type ModelSettings } from "../../settings/model-settings.js";
 import { errorToRedactedMessage } from "../../policy/redact-sensitive.js";
 import { RuntimeStatus } from "../../operations/runtime-status.js";
+import { BackendConcurrencyLimiter } from "../../operations/backend-concurrency-limiter.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,6 +27,7 @@ import {
   buildCodexPromptSet,
   createCodexBackend,
 } from "../../codex/index.js";
+import type { CodexRunResult } from "../../codex/types.js";
 import {
   filterFamilyOutput,
   stripCodexRuntimeNoise,
@@ -163,6 +165,7 @@ async function buildCodexReply(params: {
   onProgress?: (event: CodexProgressEvent) => void;
   onTextDelta?: (delta: string) => void;
   signal?: AbortSignal | undefined;
+  runBackend: (operation: () => Promise<CodexRunResult>, signal?: AbortSignal) => Promise<CodexRunResult>;
 }): Promise<string> {
   const promptSet = buildCodexPromptSet({
     config: params.config,
@@ -175,7 +178,7 @@ async function buildCodexReply(params: {
       ? { includeRecentTurns: params.includeRecentTurns }
       : {}),
   });
-  const result = await params.backend.run({
+  const result = await params.runBackend(() => params.backend.run({
     conversationId: params.session.id,
     prompt: params.backendKind === "api" ? params.userText : promptSet.prompt,
     ...(promptSet.systemPrompt ? { systemPrompt: promptSet.systemPrompt } : {}),
@@ -205,7 +208,7 @@ async function buildCodexReply(params: {
     ...(params.onProgress ? { onProgress: params.onProgress } : {}),
     ...(params.onTextDelta ? { onTextDelta: params.onTextDelta } : {}),
     ...(params.signal ? { signal: params.signal } : {}),
-  });
+  }), params.signal);
 
   if (result.cancelled) {
     if (result.text.trim()) {
@@ -277,6 +280,10 @@ export class WechatWorker {
   private readonly inboundTasks = new Set<Promise<void>>();
 
   private readonly inboundTaskQueue = new InboundTaskQueue();
+
+  private readonly backendLimiter = new BackendConcurrencyLimiter();
+
+  private readonly emittedAlerts = new Map<string, number>();
 
   private codexBackends: Record<"admin" | "family-acp" | "family-api", CodexBackend>;
 
@@ -770,6 +777,39 @@ export class WechatWorker {
       this.scheduledJobs.add(job.id);
       if (isStopCommand(parseBuiltInCommand(job.message.text))) this.scheduledControls.add(job.id);
       this.dispatchInboundMessage(account, client, job.message, job.id);
+    }
+    this.emitOperationalAlerts();
+  }
+
+  private emitOperationalAlerts(): void {
+    const diagnostics = this.options.database.getJobDiagnostics();
+    const now = Date.now();
+    const alerts: Array<{ code: string; count?: number; ageMs?: number }> = [];
+    const queued = diagnostics.counts.queued ?? 0;
+    const queueAgeMs = diagnostics.oldestQueuedAt
+      ? Math.max(0, now - Date.parse(diagnostics.oldestQueuedAt))
+      : 0;
+    if (queued >= this.options.config.wechat.queueAlertSize) {
+      alerts.push({ code: "queue_size_high", count: queued });
+    }
+    if (queued > 0 && queueAgeMs >= this.options.config.wechat.queueAlertAgeMs) {
+      alerts.push({ code: "queue_wait_too_long", count: queued, ageMs: queueAgeMs });
+    }
+    const reviewCount = diagnostics.counts.needs_review ?? 0;
+    if (reviewCount >= this.options.config.wechat.reviewAlertCount) {
+      alerts.push({ code: "jobs_need_review", count: reviewCount });
+    }
+    if (this.getRuntimeStatus().accounts.some(account => !account.healthy)) {
+      alerts.push({ code: "account_poll_unhealthy" });
+    }
+    for (const alert of alerts) {
+      const previous = this.emittedAlerts.get(alert.code) ?? 0;
+      if (now - previous < 300_000) continue;
+      this.emittedAlerts.set(alert.code, now);
+      console.warn(JSON.stringify({ event: "operational_alert", severity: "warning", ...alert }));
+    }
+    for (const code of this.emittedAlerts.keys()) {
+      if (!alerts.some(alert => alert.code === code)) this.emittedAlerts.delete(code);
     }
   }
 
@@ -1307,6 +1347,44 @@ export class WechatWorker {
                 backendForTurn.backendKind === "acp"
                   ? "final_message_run"
                   : "full_text",
+              runBackend: (operation, signal) => {
+                const backendRoute = route.role === "admin"
+                  ? "admin"
+                  : backendForTurn.backendKind === "api" ? "family-api" : "family-acp";
+                return this.backendLimiter.run(
+                  backendRoute,
+                  this.options.config.wechat.backendMaxConcurrentTasks[backendRoute],
+                  async () => {
+                    const started = Date.now();
+                    try {
+                      const result = await operation();
+                      try {
+                        this.options.database.recordModelInvocation({
+                          route: backendRoute,
+                          succeeded: result.exitCode === 0,
+                          durationMs: Date.now() - started,
+                          ...(result.usage ? { usage: result.usage } : {}),
+                        });
+                      } catch (error) {
+                        console.warn(JSON.stringify({ event: "model_metrics_write_failed", errorCode: "storage_failure" }));
+                      }
+                      return result;
+                    } catch (error) {
+                      try {
+                        this.options.database.recordModelInvocation({
+                          route: backendRoute,
+                          succeeded: false,
+                          durationMs: Date.now() - started,
+                        });
+                      } catch {
+                        console.warn(JSON.stringify({ event: "model_metrics_write_failed", errorCode: "storage_failure" }));
+                      }
+                      throw error;
+                    }
+                  },
+                  signal,
+                );
+              },
               onProgress: (event) => {
                 progress.phase = event.phase;
                 progressReplySender?.handle(event);

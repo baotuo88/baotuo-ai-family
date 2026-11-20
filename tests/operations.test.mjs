@@ -13,6 +13,7 @@ import { loadConfig } from '../dist/apps/server/config/load-config.js';
 import { choosePermissionOption, shouldReviewDeniedFamilyPermission, assertFamilyIsolation, FAMILY_HARD_BLOCKED_COMMANDS } from '../dist/apps/server/codex/permission-policy.js';
 import { applyCleanupPlan, collectCleanupPlan } from '../dist/apps/server/storage/cleanup.js';
 import { acquireDataLock } from '../dist/apps/server/storage/data-lock.js';
+import { BackendConcurrencyLimiter } from '../dist/apps/server/operations/backend-concurrency-limiter.js';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-operations-'));
@@ -34,6 +35,7 @@ async function request(db, method, url, body, runtime, authorized = true) {
   req.headers = authorized ? { authorization: `Bearer ${'a'.repeat(40)}` } : {};
   const res = response();
   const config = loadConfig(); config.server.adminToken = 'a'.repeat(40);
+  config.wechat.queueAlertSize = 1;
   await routeHttpRequest({ request: req, response: res, config, database: db,
     loginManager: {}, startedAt: '', ...(runtime ? { getRuntimeStatus: () => runtime } : {}) });
   return { status: res.code, body: JSON.parse(res.body) };
@@ -105,6 +107,35 @@ test('job status list selects the newest 100 before dashboard prioritization', t
   assert.equal(jobs[0].id, 106);
   assert.equal(jobs.at(-1).id, 7);
   assert.equal(jobs.some(job => job.id === 1), false);
+});
+
+test('model route metrics aggregate latency, outcomes and only reported token usage', t => {
+  const db = fixture(t);
+  db.recordModelInvocation({ route: 'family-api', succeeded: true, durationMs: 120,
+    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } });
+  db.recordModelInvocation({ route: 'family-api', succeeded: false, durationMs: 80 });
+  const metrics = db.getModelRouteMetrics();
+  assert.deepEqual({ ...metrics[0] }, {
+    route: 'family-api', date: new Date().toISOString().slice(0, 10), requests: 2,
+    successes: 1, failures: 1, average_duration_ms: 100, max_duration_ms: 120,
+    usage_reported_requests: 1, input_tokens: 10, output_tokens: 5, total_tokens: 15,
+  });
+  assert.equal(JSON.stringify(metrics).includes('private-'), false);
+});
+
+test('backend concurrency limiter isolates routes, queues fairly and releases after errors', async () => {
+  const limiter = new BackendConcurrencyLimiter();
+  let releaseFirst;
+  const first = limiter.run('family-api', 1, () => new Promise(resolve => { releaseFirst = resolve; }));
+  let secondStarted = false;
+  const second = limiter.run('family-api', 1, async () => { secondStarted = true; throw new Error('expected'); });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(secondStarted, false);
+  await limiter.run('admin', 1, async () => 'independent');
+  releaseFirst('done');
+  assert.equal(await first, 'done');
+  await assert.rejects(second, /expected/);
+  assert.equal(secondStarted, true);
 });
 
 test('workspace cleanup previews retention and quota candidates while protecting active sessions', t => {
@@ -237,7 +268,12 @@ test('readiness fails closed for unobserved/stale/failed polling; liveness is in
   snapshot = status.snapshot(true, ['account'], 0);
   assert.equal((await request(db, 'GET', '/readyz', undefined, snapshot)).status, 503);
   assert.equal((await request(db, 'GET', '/healthz', undefined, undefined, false)).status, 200);
-  assert.equal((await request(db, 'GET', '/api/status', undefined, snapshot)).body.jobs.counts.queued, 1);
+  const statusBody = (await request(db, 'GET', '/api/status', undefined, snapshot)).body;
+  assert.equal(statusBody.jobs.counts.queued, 1);
+  assert.ok(statusBody.alerts.some(alert => alert.code === 'queue_size_high'));
+  assert.deepEqual(statusBody.backendConcurrency, {
+    admin: 2, 'family-api': 2, 'family-acp': 2,
+  });
   assert.equal(status.snapshot(false, ['account'], 0).ready, false);
 });
 

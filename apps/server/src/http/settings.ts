@@ -1,6 +1,6 @@
 import type http from "node:http";
 import type { AppConfig, UserRole } from "../config/types.js";
-import { checkApiConnection } from "../codex/api-check.js";
+import { checkApiConnection, listApiModels } from "../codex/api-check.js";
 import { applyModelSettings, ModelSettingsStore, SettingsBusyError, SettingsInputError, type ModelSettings } from "../settings/model-settings.js";
 import { readJsonBody, respondJson } from "./response.js";
 export interface SettingsRoutes {
@@ -11,7 +11,7 @@ const testing = new WeakSet<ModelSettingsStore>();
 export async function handleSettingsRoutes(context: SettingsRoutes & {
   request: http.IncomingMessage; response: http.ServerResponse; config: AppConfig; pathname: string; method: string;
 }): Promise<boolean> {
-  if (!['/api/settings/models', '/api/settings/models/test'].includes(context.pathname)) return false;
+  if (!['/api/settings/models', '/api/settings/models/test', '/api/settings/models/list'].includes(context.pathname)) return false;
   const { settings, response } = context;
   if (!settings) { respondJson(response, 503, { ok: false, error: 'settings_unavailable' }); return true; }
   if (context.method === 'GET' && context.pathname === '/api/settings/models') {
@@ -26,6 +26,12 @@ export async function handleSettingsRoutes(context: SettingsRoutes & {
   try {
     const body = await readJsonBody(context.request);
     if (body.role !== 'admin' && body.role !== 'family') throw new SettingsInputError('Invalid role');
+    if (context.pathname.endsWith('/list')) {
+      const endpoint = settings.prepareEndpoint(body.role, body);
+      const result = await listApiModels(endpoint.baseUrl, endpoint.apiKey);
+      respondJson(response, result.ok ? 200 : 502, { ...result });
+      return true;
+    }
     const value = settings.prepare(body.role, body);
     if (context.pathname.endsWith('/test')) {
       if (testing.has(settings)) throw new SettingsBusyError('连接测试进行中，请稍后');

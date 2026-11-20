@@ -107,6 +107,20 @@ CREATE TABLE IF NOT EXISTS job_resolutions (
 );
 CREATE INDEX IF NOT EXISTS job_resolutions_job ON job_resolutions(job_id, id);
 CREATE INDEX IF NOT EXISTS inbound_jobs_status ON inbound_jobs(status, id);
+CREATE TABLE IF NOT EXISTS model_route_metrics (
+  route TEXT NOT NULL CHECK(route IN ('admin', 'family-api', 'family-acp')),
+  metric_date TEXT NOT NULL,
+  request_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  total_duration_ms INTEGER NOT NULL DEFAULT 0,
+  max_duration_ms INTEGER NOT NULL DEFAULT 0,
+  usage_reported_count INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (route, metric_date)
+);
 CREATE INDEX IF NOT EXISTS sessions_peer ON sessions(wechat_account_id, contact_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS messages_session_time ON messages(session_id, created_at);
 `;

@@ -25,4 +25,9 @@ export interface CodexRunResult {
   exitCode: number | null;
   timedOut: boolean;
   cancelled?: boolean | undefined;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  } | undefined;
 }

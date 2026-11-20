@@ -15,6 +15,16 @@ interface ApiErrorPayload {
   code?: string;
 }
 
+interface ApiUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
 interface ChatCompletionResponse {
   choices?: Array<{
     message?: {
@@ -27,6 +37,7 @@ interface ChatCompletionResponse {
   }>;
   output_text?: string;
   error?: ApiErrorPayload;
+  usage?: ApiUsage;
 }
 
 interface ChatCompletionContentPart {
@@ -55,6 +66,7 @@ interface ResponsesApiResponse {
   output_text?: string;
   output?: ResponsesOutputItem[];
   error?: ApiErrorPayload;
+  usage?: ApiUsage;
 }
 
 interface ApiStreamChunk {
@@ -70,6 +82,23 @@ interface ApiStreamChunk {
     text?: string;
   }>;
   error?: ApiErrorPayload;
+  usage?: ApiUsage;
+}
+
+function readApiUsage(payload: { usage?: ApiUsage } | undefined) {
+  const usage = payload?.usage;
+  if (!usage) return undefined;
+  const inputTokens = "input_tokens" in usage ? usage.input_tokens : usage.prompt_tokens;
+  const outputTokens = "output_tokens" in usage ? usage.output_tokens : usage.completion_tokens;
+  const totalTokens = usage.total_tokens;
+  if (![inputTokens, outputTokens, totalTokens].every(value => Number.isFinite(value))) {
+    return undefined;
+  }
+  return {
+    inputTokens: Number(inputTokens),
+    outputTokens: Number(outputTokens),
+    totalTokens: Number(totalTokens),
+  };
 }
 
 type ResponsesTextPart =
@@ -697,6 +726,9 @@ export class ApiCodexBackend implements CodexBackend {
               stderr: "",
               exitCode: 0,
               timedOut: false,
+              ...(readApiUsage(streamResult.finalPayload?.response ?? streamResult.finalPayload) ? {
+                usage: readApiUsage(streamResult.finalPayload?.response ?? streamResult.finalPayload),
+              } : {}),
             },
           };
         }
@@ -792,6 +824,7 @@ export class ApiCodexBackend implements CodexBackend {
         stderr: "",
         exitCode: 0,
         timedOut: false,
+        ...(readApiUsage(payload) ? { usage: readApiUsage(payload) } : {}),
       },
     };
   }
@@ -830,6 +863,9 @@ export class ApiCodexBackend implements CodexBackend {
             stderr: "",
             exitCode: 0,
             timedOut: false,
+            ...(readApiUsage(streamResult.finalPayload?.response ?? streamResult.finalPayload) ? {
+              usage: readApiUsage(streamResult.finalPayload?.response ?? streamResult.finalPayload),
+            } : {}),
           };
         }
         this.markChatStreamUnsupported();
@@ -845,6 +881,7 @@ export class ApiCodexBackend implements CodexBackend {
               stderr: "",
               exitCode: 0,
               timedOut: false,
+              ...(readApiUsage(payload) ? { usage: readApiUsage(payload) } : {}),
             };
           }
         } else if (isTemporaryFailure(streamResponse.status)) {
@@ -900,6 +937,7 @@ export class ApiCodexBackend implements CodexBackend {
       stderr: "",
       exitCode: 0,
       timedOut: false,
+      ...(readApiUsage(payload) ? { usage: readApiUsage(payload) } : {}),
     };
   }
 
@@ -924,6 +962,29 @@ export class ApiCodexBackend implements CodexBackend {
     try {
       if (request.signal?.aborted) {
         controller.abort();
+      }
+      const wireApi = this.config.apiWireApi ?? "auto";
+      if (wireApi === "chat") {
+        return await this.runChatCompletions(request, controller);
+      }
+      if (wireApi === "responses") {
+        if (!this.shouldTryResponses()) {
+          return {
+            text: "",
+            stderr: "Responses API is not supported by this endpoint",
+            exitCode: 1,
+            timedOut: false,
+          };
+        }
+        const responsesResult = await this.runResponses(request, controller);
+        return responsesResult.kind === "success" || responsesResult.kind === "error"
+          ? responsesResult.result
+          : {
+              text: "",
+              stderr: "Responses API is not supported by this endpoint",
+              exitCode: 1,
+              timedOut: false,
+            };
       }
       if (this.shouldTryResponses()) {
         const responsesResult = await this.runResponses(request, controller);

@@ -276,6 +276,43 @@ export class AppDatabase {
       oldestRunningAt: row?.running ? String(row.running) : null };
   }
 
+  recordModelInvocation(params: {
+    route: "admin" | "family-api" | "family-acp";
+    succeeded: boolean;
+    durationMs: number;
+    usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  }): void {
+    const date = new Date().toISOString().slice(0, 10);
+    this.db.prepare(`INSERT INTO model_route_metrics
+      (route, metric_date, request_count, success_count, failure_count, total_duration_ms,
+       max_duration_ms, usage_reported_count, input_tokens, output_tokens, total_tokens)
+      VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(route, metric_date) DO UPDATE SET
+        request_count = request_count + 1,
+        success_count = success_count + excluded.success_count,
+        failure_count = failure_count + excluded.failure_count,
+        total_duration_ms = total_duration_ms + excluded.total_duration_ms,
+        max_duration_ms = MAX(max_duration_ms, excluded.max_duration_ms),
+        usage_reported_count = usage_reported_count + excluded.usage_reported_count,
+        input_tokens = input_tokens + excluded.input_tokens,
+        output_tokens = output_tokens + excluded.output_tokens,
+        total_tokens = total_tokens + excluded.total_tokens`)
+      .run(params.route, date, params.succeeded ? 1 : 0, params.succeeded ? 0 : 1,
+        Math.max(0, Math.round(params.durationMs)), Math.max(0, Math.round(params.durationMs)),
+        params.usage ? 1 : 0, params.usage?.inputTokens ?? 0,
+        params.usage?.outputTokens ?? 0, params.usage?.totalTokens ?? 0);
+  }
+
+  getModelRouteMetrics(): Record<string, unknown>[] {
+    return this.db.prepare(`SELECT route, metric_date AS date, request_count AS requests,
+      success_count AS successes, failure_count AS failures,
+      CASE WHEN request_count = 0 THEN 0 ELSE ROUND(total_duration_ms * 1.0 / request_count) END AS average_duration_ms,
+      max_duration_ms, usage_reported_count AS usage_reported_requests,
+      input_tokens, output_tokens, total_tokens
+      FROM model_route_metrics WHERE metric_date >= date('now', '-6 days')
+      ORDER BY metric_date DESC, route`).all();
+  }
+
   getInboundJobDetail(id: number): Record<string, unknown> | undefined {
     const job = this.db.prepare(`SELECT id, wechat_account_id, source_message_id, contact_id,
       status, phase, delivery_status, error_code, started_at, finished_at, created_at, updated_at

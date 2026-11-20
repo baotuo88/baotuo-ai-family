@@ -230,6 +230,64 @@ test('API check uses backend fallback and never exposes provider errors or key',
   } finally { globalThis.fetch = original; }
 });
 
+test('API backend returns provider-reported token usage for route metrics', async () => {
+  const original = globalThis.fetch;
+  const { ApiCodexBackend } = await import('../dist/apps/server/codex/api-backend.js');
+  const config = { ...loadConfig().codex.family, apiBaseUrl: 'https://provider.test/v1', apiKey: 'test-key' };
+  globalThis.fetch = async () => new Response(JSON.stringify({ output_text: 'ok', usage: {
+    input_tokens: 21, output_tokens: 8, total_tokens: 29,
+  } }), { status: 200 });
+  try {
+    const backend = new ApiCodexBackend(config);
+    const result = await backend.run({ conversationId: 'test', prompt: 'hello', role: 'family' });
+    assert.equal(result.text, 'ok');
+    assert.deepEqual(result.usage, { inputTokens: 21, outputTokens: 8, totalTokens: 29 });
+    backend.dispose();
+  } finally { globalThis.fetch = original; }
+});
+
+test('API backend honors an explicit Chat Completions interface without probing Responses', async () => {
+  const original = globalThis.fetch;
+  const { ApiCodexBackend } = await import('../dist/apps/server/codex/api-backend.js');
+  const config = { ...loadConfig().codex.family, apiBaseUrl: 'https://provider.test/v1', apiKey: 'test-key', apiWireApi: 'chat' };
+  const calls = [];
+  globalThis.fetch = async url => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'chat-ok' } }] }), { status: 200 });
+  };
+  try {
+    const backend = new ApiCodexBackend(config);
+    const result = await backend.run({ conversationId: 'chat-test', prompt: 'hello', role: 'family' });
+    assert.equal(result.text, 'chat-ok');
+    assert.deepEqual(calls, ['https://provider.test/v1/chat/completions']);
+    backend.dispose();
+  } finally { globalThis.fetch = original; }
+});
+
+test('API backend does not fall back from an explicit Responses interface when it is cached as unsupported', async () => {
+  const original = globalThis.fetch;
+  const { ApiCodexBackend } = await import('../dist/apps/server/codex/api-backend.js');
+  const config = { ...loadConfig().codex.family, apiBaseUrl: 'https://provider.test/v1', apiKey: 'test-key', apiWireApi: 'auto' };
+  const calls = [];
+  globalThis.fetch = async url => {
+    calls.push(String(url));
+    return String(url).endsWith('/responses')
+      ? new Response('{"error":{"message":"not found"}}', { status: 404 })
+      : new Response('{"choices":[{"message":{"content":"auto-fallback"}}]}', { status: 200 });
+  };
+  const backend = new ApiCodexBackend(config);
+  try {
+    const automatic = await backend.run({ conversationId: 'auto-test', prompt: 'hello', role: 'family' });
+    assert.equal(automatic.text, 'auto-fallback');
+    config.apiWireApi = 'responses';
+    calls.length = 0;
+    const explicit = await backend.run({ conversationId: 'responses-test', prompt: 'hello', role: 'family' });
+    assert.notEqual(explicit.exitCode, 0);
+    assert.match(explicit.stderr, /Responses API is not supported/);
+    assert.deepEqual(calls, []);
+  } finally { backend.dispose(); globalThis.fetch = original; }
+});
+
 test('worker applies current authorization at execution and separates revoked admin history', async t => {
   // Substitute the external model factory only; exercise the actual worker, SQLite,
   // command routing, queue and session transitions without network/model credentials.

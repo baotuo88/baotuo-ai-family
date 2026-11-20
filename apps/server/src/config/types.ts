@@ -3,6 +3,7 @@ export type UserRole = "admin" | "family";
 export type CodexMode = "suggest" | "auto-edit" | "full-auto";
 export type CodexEnvMode = "inherit" | "minimal";
 export type CodexBackendKind = "cli" | "acp" | "api";
+export type CodexApiWireApi = "auto" | "responses" | "chat";
 export type CodexAcpAuthMode = "auto" | "env" | "none";
 export type CodexReasoningEffort =
   | "none"
@@ -51,6 +52,7 @@ export interface CodexRuntimeConfig {
   apiBaseUrl?: string | undefined;
   apiKey?: string | undefined;
   apiModel: string;
+  apiWireApi?: CodexApiWireApi | undefined;
   apiPromptCacheKeyPrefix: string;
   codexHome?: string | undefined;
   envOverrides: Record<string, string>;
@@ -97,6 +99,10 @@ export interface ServerConfig {
 
 export interface WechatConfig {
   maxConcurrentTasks: number;
+  backendMaxConcurrentTasks: Record<"admin" | "family-api" | "family-acp", number>;
+  queueAlertSize: number;
+  queueAlertAgeMs: number;
+  reviewAlertCount: number;
   apiBaseUrl: string;
   cdnBaseUrl: string;
   channelVersion: string;

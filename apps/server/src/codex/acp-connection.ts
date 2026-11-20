@@ -591,6 +591,11 @@ export function buildAcpLaunch(config: CodexRuntimeConfig): {
   delete env[ACP_PERMISSION_PROFILE_ENV];
   const codexConfig = readCodexConfig(env);
   applyLegacyAcpArgs(codexConfig, config.acpArgs);
+  if (config.apiWireApi && config.apiWireApi !== "auto" && typeof codexConfig.model_provider === "string") {
+    const providers = codexConfig.model_providers;
+    const provider = isJsonObject(providers) ? providers[codexConfig.model_provider] : undefined;
+    if (isJsonObject(provider)) provider.wire_api = config.apiWireApi;
+  }
 
   if (config.roleOverrides?.model) {
     setCodexConfigValue(codexConfig, "model", config.roleOverrides.model);

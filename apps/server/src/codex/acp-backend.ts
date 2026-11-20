@@ -429,7 +429,7 @@ export class AcpCodexBackend implements CodexBackend {
     // Never reuse a remote ACP session after changing endpoint, credentials or model.
     return crypto.createHash("sha256").update(JSON.stringify({
       base: this.config.apiBaseUrl, key: this.config.apiKey, model: this.config.apiModel,
-      overrides: this.config.roleOverrides, args: this.config.acpArgs,
+      overrides: this.config.roleOverrides, wireApi: this.config.apiWireApi, args: this.config.acpArgs,
     })).digest("hex");
   }
 

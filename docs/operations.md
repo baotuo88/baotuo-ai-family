@@ -17,9 +17,15 @@ pnpm verify
 
 - `GET /healthz`：进程 HTTP 存活，继续供 Docker 使用。
 - `GET /readyz`：业务轮询就绪。无有效账号、Worker 未运行、任一活动账号尚未成功轮询、成功时间超过 120 秒、或连续失败达到 3 次时返回 **503**；否则 200。
-- `GET /api/status`：Worker 状态、活动任务数、各账号最后成功/失败轮询时间、连续失败次数、任务数量及最早排队/执行时间。
+- `GET /api/status`：Worker 状态、活动任务数、各账号轮询状态、任务数量、模型后端最近 7 天调用/成功/失败数、平均及最大延迟、上游报告的 token 用量、后端并发上限及告警。
 
 轮询指标是进程内状态，重启后重新观测。`modelChecked=false`、`sandboxChecked=false` 明确说明这里没有执行付费模型请求或沙箱探测；轮询就绪不代表模型可用。多个账号中任一异常都会使 `/readyz` 返回 503，但不会重启其他正常账号；不要把它替换为 Docker 存活检查。
+
+模型路由指标按日聚合并持久化，只记录管理员后端、`family-api`、`family-acp` 的请求数、成功/失败数、延迟和上游明确报告的 token 数，不记录会话、消息或原始错误。API 后端只在响应包含完整用量字段时计入 token；ACP 当前的 usage 更新表示上下文窗口占用，不等于本轮 token 消耗，因此不计入。近期没有用量字段时，`usage_reported_requests` 会低于请求数，token 总数也可能为 0。
+
+管理后台的模型设置支持通过 API 地址和 Key 获取 `/models` 列表；只返回模型 ID，仍可手动输入未列出的模型。`接口协议` 可选自动、Responses API 或 Chat Completions；自动模式保留 Responses 优先、失败后回退 Chat Completions 的行为，指定协议时不会探测另一种接口。模型列表请求不会保存新 Key，已有 Key 仍由设置存储加密保管。
+
+`WECHAT_MAX_CONCURRENT_TASKS` 仍限制普通任务总并发；`WECHAT_ADMIN_MAX_CONCURRENT`、`WECHAT_FAMILY_API_MAX_CONCURRENT`、`WECHAT_FAMILY_ACP_MAX_CONCURRENT` 分别进一步限制管理员、家庭 API、家庭 ACP 调用。同一联系人仍按序处理，停止命令走独立控制通道。`/api/status` 在排队数、最老等待时间、待复核任务数或轮询异常时返回 `alerts`；Worker 也会输出限频的 `operational_alert` JSON 日志。队列和待复核阈值可用 `WECHAT_QUEUE_ALERT_SIZE`、`WECHAT_QUEUE_ALERT_AGE_MS`、`WECHAT_REVIEW_ALERT_COUNT` 调整。该告警需由部署方采集状态接口或容器日志，不会主动发送外部通知。
 
 任务生命周期和轮询失败增加 JSON 日志：`job_started`、`job_succeeded`、`job_needs_review`、`poll_failed`。任务日志使用 jobId 关联，成功/失败记录 durationMs，不记录消息正文、凭据和上游错误原文。其他旧日志尚未全部结构化。
 
@@ -67,6 +73,5 @@ pnpm cleanup -- --apply
 ## 后续阶段
 
 - 加密备份与恢复演练。
-- 自动告警、模型用量与延迟统计、分后端并发配额。
 - Worker 调度/轮询/回复模块的大规模拆分。
 - 真实微信/API/ACP、Docker 构建及部署验证。

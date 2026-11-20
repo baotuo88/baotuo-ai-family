@@ -3,11 +3,58 @@ import type { CodexRuntimeConfig } from "../config/types.js";
 import { ApiCodexBackend } from "./api-backend.js";
 
 export interface ApiCheckResult { ok: boolean; detail: string }
+
+export interface ApiModelListResult { ok: boolean; models: string[]; detail: string }
+
+function validateApiUrl(value: string): URL | undefined {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      return undefined;
+    }
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function listApiModels(baseUrl: string, apiKey: string): Promise<ApiModelListResult> {
+  const url = validateApiUrl(baseUrl);
+  if (!url || !apiKey) return { ok: false, models: [], detail: "API 地址或 API Key 无效" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(`${url.toString().replace(/\/+$/, "")}/models`, {
+      headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) return { ok: false, models: [], detail: "模型列表获取失败，请检查接口地址、Key 或权限" };
+    const payload: unknown = await response.json();
+    const records = Array.isArray(payload)
+      ? payload
+      : payload && typeof payload === "object" && Array.isArray((payload as { data?: unknown }).data)
+        ? (payload as { data: unknown[] }).data
+        : payload && typeof payload === "object" && Array.isArray((payload as { models?: unknown }).models)
+          ? (payload as { models: unknown[] }).models
+          : [];
+    const models = [...new Set(records.map(item => {
+      if (typeof item === "string") return item.trim();
+      if (!item || typeof item !== "object") return "";
+      const id = (item as { id?: unknown }).id;
+      return typeof id === "string" ? id.trim() : "";
+    }).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+    return { ok: true, models: models.slice(0, 500), detail: models.length ? `已获取 ${Math.min(models.length, 500)} 个模型` : "接口返回的模型列表为空" };
+  } catch (error) {
+    return { ok: false, models: [], detail: error instanceof Error && error.name === "AbortError" ? "获取模型列表超时" : "模型列表获取失败，请检查接口地址和网络" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function checkApiConnection(config: CodexRuntimeConfig): Promise<ApiCheckResult> {
   if (!config.apiBaseUrl || !config.apiKey) return { ok: false, detail: "缺少 API_BASE_URL 或 API_KEY" };
   try {
-    const url = new URL(config.apiBaseUrl);
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    if (!validateApiUrl(config.apiBaseUrl)) {
       return { ok: false, detail: "API 地址必须是无内嵌凭据、查询参数和片段的 HTTP(S) 地址" };
     }
   } catch { return { ok: false, detail: "API 地址无效" }; }

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import type { AppConfig, CodexRuntimeConfig, CodexReasoningEffort, UserRole } from "../config/types.js";
+import type { AppConfig, CodexApiWireApi, CodexRuntimeConfig, CodexReasoningEffort, UserRole } from "../config/types.js";
 import { isCodexReasoningEffort, isCodexModelReasoningEffortSupported } from "../config/reasoning.js";
 
 export interface ModelSettings {
@@ -10,6 +10,7 @@ export interface ModelSettings {
   model: string;
   reasoningEffort: CodexReasoningEffort;
   backend: "api" | "acp";
+  wireApi: CodexApiWireApi;
 }
 export type ModelSettingsMap = Partial<Record<UserRole, ModelSettings>>;
 export class SettingsInputError extends Error {}
@@ -35,14 +36,17 @@ function validate(input: Record<string, unknown>, previous?: ModelSettings): Mod
     throw new SettingsInputError("模型与思考强度不兼容");
   }
   if (input.backend !== 'api' && input.backend !== 'acp') throw new SettingsInputError("Invalid backend");
+  const wireApi = input.wireApi === undefined ? (previous?.wireApi ?? "auto") : input.wireApi;
+  if (wireApi !== "auto" && wireApi !== "responses" && wireApi !== "chat") throw new SettingsInputError("Invalid API interface");
   const apiKey = input.apiKey === undefined || input.apiKey === ""
     ? previous?.apiKey : text("apiKey", 8192);
   if (!apiKey) throw new SettingsInputError("首次保存必须填写 API Key；留空仅保留已有 Key");
-  return { baseUrl: baseUrl.replace(/\/+$/, ''), model, apiKey, reasoningEffort, backend: input.backend };
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), model, apiKey, reasoningEffort, backend: input.backend, wireApi };
 }
 
 export function applyModelSettings(base: CodexRuntimeConfig, settings: ModelSettings): CodexRuntimeConfig {
   return { ...base, backend: settings.backend, apiBaseUrl: settings.baseUrl, apiKey: settings.apiKey,
+    apiWireApi: settings.wireApi,
     apiModel: settings.model, acpAuthMode: 'env',
     roleOverrides: { model: settings.model, reasoningEffort: settings.reasoningEffort },
     envOverrides: { ...base.envOverrides,
@@ -90,7 +94,7 @@ export class ModelSettingsStore {
       const base = this.config.codex[role];
       return [role, { baseUrl: saved?.baseUrl ?? base.apiBaseUrl ?? '', model: saved?.model ?? base.apiModel,
         reasoningEffort: saved?.reasoningEffort ?? base.roleOverrides?.reasoningEffort ?? 'high',
-        backend: saved?.backend ?? base.backend, hasApiKey: Boolean(saved?.apiKey ?? base.apiKey),
+        backend: saved?.backend ?? base.backend, wireApi: saved?.wireApi ?? base.apiWireApi ?? 'auto', hasApiKey: Boolean(saved?.apiKey ?? base.apiKey),
         source: saved ? 'dashboard' : 'environment' }];
     }));
     return { roles, precedence: 'dashboard > environment/WeChat model and provider overrides for configured roles' };
@@ -99,9 +103,32 @@ export class ModelSettingsStore {
     const base = this.config.codex[role];
     const previous = this.current[role] ?? (base.apiKey ? {
       baseUrl: base.apiBaseUrl ?? '', apiKey: base.apiKey, model: base.apiModel,
-      reasoningEffort: base.roleOverrides?.reasoningEffort ?? 'high', backend: base.backend === 'api' ? 'api' : 'acp',
+      reasoningEffort: base.roleOverrides?.reasoningEffort ?? 'high', backend: base.backend === 'api' ? 'api' : 'acp', wireApi: base.apiWireApi ?? 'auto',
     } as ModelSettings : undefined);
     return validate(body, previous);
+  }
+
+  prepareEndpoint(role: UserRole, body: Record<string, unknown>): { baseUrl: string; apiKey: string } {
+    const value = body.baseUrl;
+    if (typeof value !== "string" || !value.trim() || value.length > 2048 || /[\r\n\0]/.test(value)) {
+      throw new SettingsInputError("Invalid baseUrl");
+    }
+    const baseUrl = value.trim();
+    try {
+      const url = new URL(baseUrl);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        throw new Error();
+      }
+    } catch {
+      throw new SettingsInputError("API 地址仅支持无凭据、查询参数和片段的 HTTP(S) URL");
+    }
+    const base = this.config.codex[role];
+    const previous = this.current[role]?.apiKey ?? base.apiKey;
+    const apiKey = body.apiKey === undefined || body.apiKey === "" ? previous : body.apiKey;
+    if (typeof apiKey !== "string" || !apiKey.trim() || apiKey.length > 8192 || /[\r\n\0]/.test(apiKey)) {
+      throw new SettingsInputError("首次获取模型必须填写 API Key；留空仅保留已有 Key");
+    }
+    return { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey: apiKey.trim() };
   }
   save(role: UserRole, settings: ModelSettings): void {
     const next = { ...this.current, [role]: settings };

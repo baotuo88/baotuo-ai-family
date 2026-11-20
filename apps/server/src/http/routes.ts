@@ -50,6 +50,7 @@ const ROOT_ENDPOINTS = [
   "/admin",
   "/api/settings/models",
   "/api/settings/models/test",
+  "/api/settings/models/list",
   "/api/contacts",
 ];
 
@@ -185,8 +186,27 @@ export async function routeHttpRequest(params: SettingsRoutes & {
   if (await handleJobRoutes(context)) return;
   if (context.pathname === "/api/status" && context.method === "GET") {
     const runtime = context.getRuntimeStatus?.();
+    const jobs = context.database.getJobDiagnostics();
+    const alerts: Array<{ code: string; severity: "warning"; count?: number; ageMs?: number }> = [];
+    const queued = jobs.counts.queued ?? 0;
+    const queuedAgeMs = jobs.oldestQueuedAt
+      ? Math.max(0, Date.now() - Date.parse(jobs.oldestQueuedAt))
+      : 0;
+    if (queued >= context.config.wechat.queueAlertSize) {
+      alerts.push({ code: "queue_size_high", severity: "warning", count: queued });
+    }
+    if (queued > 0 && queuedAgeMs >= context.config.wechat.queueAlertAgeMs) {
+      alerts.push({ code: "queue_wait_too_long", severity: "warning", count: queued, ageMs: queuedAgeMs });
+    }
+    if ((jobs.counts.needs_review ?? 0) >= context.config.wechat.reviewAlertCount) {
+      alerts.push({ code: "jobs_need_review", severity: "warning", count: jobs.counts.needs_review ?? 0 });
+    }
+    if (runtime && runtime.accounts.some(account => !account.healthy)) {
+      alerts.push({ code: "account_poll_unhealthy", severity: "warning" });
+    }
     respondJson(context.response, 200, { ok: true, runtime: runtime ?? null,
-      jobs: context.database.getJobDiagnostics() });
+      jobs, modelMetrics: context.database.getModelRouteMetrics(), alerts,
+      backendConcurrency: context.config.wechat.backendMaxConcurrentTasks });
     return;
   }
 

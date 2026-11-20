@@ -168,6 +168,28 @@ test('API test uses candidate settings, sanitizes failure and never saves creden
   assert.equal(response.body.includes(value.apiKey), false); assert.equal(f.settings.get('family'), undefined);
 });
 
+test('model list endpoint returns only sanitized model ids and preserves saved credentials', async t => {
+  const f = fixture(t), original = global.fetch;
+  f.settings.save('family', f.settings.prepare('family', value));
+  global.fetch = async url => {
+    assert.equal(String(url), 'https://example.invalid/v1/models');
+    return new Response(JSON.stringify({ data: [{ id: 'zeta' }, { id: 'alpha' }, { id: 'alpha' }, { name: 'ignored' }] }), { status: 200 });
+  };
+  t.after(() => { global.fetch = original; });
+  const response = await call(f, 'POST', '/api/settings/models/list', { role: 'family', baseUrl: value.baseUrl, apiKey: '' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.body).models, ['alpha', 'zeta']);
+  assert.equal(response.body.includes(value.apiKey), false);
+  assert.equal(f.settings.get('family').apiKey, value.apiKey);
+});
+
+test('admin dashboard displays model-list detail errors', async t => {
+  const f = fixture(t);
+  const page = await call(f, 'GET', '/admin');
+  assert.equal(page.status, 200);
+  assert.match(page.body, /data\.detail \|\| data\.message \|\| data\.error/);
+});
+
 test('failed persistence does not replace live backends or expose candidate credentials', async t => {
   const f = fixture(t), previous = f.worker.codexBackends.admin;
   const original = f.settings.save;

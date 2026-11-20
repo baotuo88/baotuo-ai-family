@@ -6,6 +6,7 @@ import {
   AppConfig,
   CodexAcpAuthMode,
   CodexBackendKind,
+  CodexApiWireApi,
   CodexEnvMode,
   CodexMode,
   CodexProviderProfile,
@@ -151,6 +152,14 @@ function readBackend(name: string, fallback: CodexBackendKind): CodexBackendKind
     throw new Error(`Environment variable ${name} is not a valid Codex backend: ${raw}`);
   }
 
+  return raw;
+}
+
+function readApiWireApi(name: string, fallback: CodexApiWireApi): CodexApiWireApi {
+  const raw = readOptionalTrimmedEnv(name) ?? fallback;
+  if (raw !== "auto" && raw !== "responses" && raw !== "chat") {
+    throw new Error(`Environment variable ${name} is not a valid API interface: ${raw}`);
+  }
   return raw;
 }
 
@@ -730,6 +739,14 @@ export function loadConfig(): AppConfig {
     },
     wechat: {
       maxConcurrentTasks: Math.min(32, readPositiveInteger("WECHAT_MAX_CONCURRENT_TASKS", 4)),
+      backendMaxConcurrentTasks: {
+        admin: Math.min(32, readPositiveInteger("WECHAT_ADMIN_MAX_CONCURRENT", 2)),
+        "family-api": Math.min(32, readPositiveInteger("WECHAT_FAMILY_API_MAX_CONCURRENT", 2)),
+        "family-acp": Math.min(32, readPositiveInteger("WECHAT_FAMILY_ACP_MAX_CONCURRENT", 2)),
+      },
+      queueAlertSize: readPositiveInteger("WECHAT_QUEUE_ALERT_SIZE", 20),
+      queueAlertAgeMs: readPositiveInteger("WECHAT_QUEUE_ALERT_AGE_MS", 300_000),
+      reviewAlertCount: readPositiveInteger("WECHAT_REVIEW_ALERT_COUNT", 1),
       apiBaseUrl: readEnv("WECHAT_API_BASE_URL", "https://ilinkai.weixin.qq.com"),
       cdnBaseUrl: readEnv(
         "WECHAT_CDN_BASE_URL",
@@ -797,6 +814,7 @@ export function loadConfig(): AppConfig {
         apiBaseUrl: adminApiBaseUrl,
         apiKey: adminApiKey,
         apiModel: readOptionalEnv("CODEX_ADMIN_API_MODEL", codexApiModel),
+        apiWireApi: readApiWireApi("CODEX_ADMIN_API_WIRE_API", "auto"),
         apiPromptCacheKeyPrefix: readOptionalEnv(
           "CODEX_ADMIN_API_PROMPT_CACHE_KEY_PREFIX",
           "wechat-admin",
@@ -849,6 +867,7 @@ export function loadConfig(): AppConfig {
         apiBaseUrl: familyApiBaseUrl,
         apiKey: familyApiKey,
         apiModel: readOptionalEnv("CODEX_FAMILY_API_MODEL", codexApiModel),
+        apiWireApi: readApiWireApi("CODEX_FAMILY_API_WIRE_API", "auto"),
         apiPromptCacheKeyPrefix: readOptionalEnv(
           "CODEX_FAMILY_API_PROMPT_CACHE_KEY_PREFIX",
           "wechat-family",
