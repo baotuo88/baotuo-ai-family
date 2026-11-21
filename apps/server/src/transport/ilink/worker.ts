@@ -1,4 +1,6 @@
-import { applyModelSettings, ModelSettingsStore, SettingsBusyError, type ModelSettings } from "../../settings/model-settings.js";
+import { ImageGenerationService, parseImagePrompt } from "../../media/image-service.js";
+import { ModelServiceError, modelFailure } from "../../operations/model-failure.js";
+import { applyModelSettings, ModelSettingsStore, ModelNotConfiguredError, SettingsBusyError, type ModelSettings } from "../../settings/model-settings.js";
 import { errorToRedactedMessage } from "../../policy/redact-sensitive.js";
 import { RuntimeStatus } from "../../operations/runtime-status.js";
 import { BackendConcurrencyLimiter } from "../../operations/backend-concurrency-limiter.js";
@@ -287,7 +289,10 @@ export class WechatWorker {
 
   private codexBackends: Record<"admin" | "family-acp" | "family-api", CodexBackend>;
 
+  private readonly imageService: ImageGenerationService;
+
   constructor(private readonly options: WechatWorkerOptions) {
+    this.imageService = new ImageGenerationService(options);
     this.codexBackends = {
       admin: createCodexBackend(
         this.buildRuntimeCodexConfig("admin", { providerRoute: "admin-acp" }),
@@ -460,6 +465,23 @@ export class WechatWorker {
     }
   }
 
+  async redeliverMedia(id: string): Promise<void> {
+    if (this.stopPromise) throw new SettingsBusyError("服务正在停止");
+    const media = this.options.database.capabilities.media(id);
+    const account = media && this.options.database.getAccountById(media.account_id);
+    const session = media && this.options.database.getSessionByPeer(media.account_id, media.contact_id);
+    if (!media || !account || account.status !== "active" || !session?.contextToken) {
+      throw new ModelServiceError("permission", "原账号或联系人的有效会话不可用，请先向机器人发送消息。");
+    }
+    const client = new ILinkApiClient({ baseUrl: account.baseUrl ?? this.options.config.wechat.apiBaseUrl,
+      cdnBaseUrl: this.options.config.wechat.cdnBaseUrl, channelVersion: this.options.config.wechat.channelVersion,
+      ...(this.options.config.wechat.routeTag ? { routeTag: this.options.config.wechat.routeTag } : {}), token: account.authToken });
+    const task = this.imageService.deliver({ id, client, session, signal: this.lifecycleController.signal,
+      onDeliveryStart: () => {}, onDeliveryAccepted: () => {}, onDeliveryUncertain: () => {} });
+    this.inboundTasks.add(task);
+    try { await task; } finally { this.inboundTasks.delete(task); }
+  }
+
   private rebuildCodexBackend(role: UserRole): void {
     if (role === "admin") {
       this.codexBackends.admin.dispose();
@@ -543,6 +565,7 @@ export class WechatWorker {
 
     this.lifecycleController = new AbortController();
     this.options.database.recoverInterruptedJobs();
+    this.options.database.capabilities.recoverMedia();
     this.running = true;
     this.loopPromise = this.runLoop();
   }
@@ -637,7 +660,7 @@ export class WechatWorker {
       });
       if (this.options.settings && !adminConfig.apiKey &&
           !fs.existsSync(path.join(adminConfig.codexHome ?? "", "auth.json"))) {
-        throw new Error("请先在管理后台配置模型服务");
+        throw new ModelNotConfiguredError("admin");
       }
       return {
         backend: this.codexBackends.admin,
@@ -665,7 +688,7 @@ export class WechatWorker {
     }
     if (!canUseFamilyApi && this.options.settings && !managedFamily &&
         !fs.existsSync(path.join(familyApiConfig.codexHome ?? "", "auth.json"))) {
-      throw new Error("请先在管理后台配置模型服务");
+      throw new ModelNotConfiguredError("family");
     }
     if (decision.backend === "acp" || !canUseFamilyApi) {
       return {
@@ -970,6 +993,37 @@ export class WechatWorker {
         createdAt: new Date().toISOString(),
         sourceMessageId: clientId || inbound.sourceMessageId,
       });
+      return;
+    }
+
+    const imagePrompt = parseImagePrompt(inbound.text);
+    if (imagePrompt !== undefined) {
+      const controller = new AbortController();
+      this.activeTurns.set(activeTurnKey, { controller, conversationId: activeSession.id, startedAt: new Date().toISOString() });
+      this.options.database.appendMessage({ id: buildMessageId("inbound"), sessionId: activeSession.id,
+        direction: "inbound", messageType: "text", textContent: inbound.text, createdAt: inbound.receivedAt, sourceMessageId: inbound.sourceMessageId });
+      phase("executing");
+      let uncertain = false;
+      try {
+        await this.imageService.generate({ prompt: imagePrompt, session: activeSession, sourceMessageId: inbound.sourceMessageId,
+          signal: controller.signal, client, onDeliveryStart: deliveryStart, onDeliveryAccepted: deliveryAccepted,
+          onDeliveryUncertain: () => { uncertain = true; deliveryUncertain(); } });
+      } catch (error) {
+        const failure = modelFailure(error);
+        const reference = this.options.database.capabilities.diagnose(route.role, failure.code, jobId);
+        const text = failure.detail + "\n诊断编号：" + reference;
+        // A later status message must not overwrite an uncertain image delivery.
+        deliveryStart();
+        try {
+          const sent = await sendTextMessage({ client, toUserId: inbound.contactId, contextToken: inbound.contextToken, text });
+          if (!uncertain) deliveryAccepted();
+          this.options.database.appendMessage({ id: buildMessageId("outbound"), sessionId: activeSession.id,
+            direction: "outbound", messageType: "text", textContent: text, createdAt: new Date().toISOString(), sourceMessageId: sent || inbound.sourceMessageId });
+        } catch { deliveryUncertain(); }
+        throw new Error("Image task requires review");
+      } finally {
+        if (this.activeTurns.get(activeTurnKey)?.controller === controller) this.activeTurns.delete(activeTurnKey);
+      }
       return;
     }
 
@@ -1357,6 +1411,10 @@ export class WechatWorker {
                   async () => {
                     const started = Date.now();
                     try {
+                      if (this.options.database.getAccountById(account.id)?.status !== "active") throw new ModelServiceError("permission");
+                      this.options.database.capabilities.reserve(account.id, inbound.contactId, "chat", inbound.sourceMessageId,
+                        { admin: route.role === "admin" && this.options.database.getAccountById(account.id)?.role === "admin" &&
+                          this.options.database.isAdminContact(account.id, inbound.contactId) });
                       const result = await operation();
                       try {
                         this.options.database.recordModelInvocation({
@@ -1416,13 +1474,15 @@ export class WechatWorker {
       } catch (error) {
         executionFailed = true;
         console.error("[worker] codex reply failed", errorToRedactedMessage(error));
+        const failure = modelFailure(error);
+        const reference = this.options.database.capabilities.diagnose(route.role, failure.code, jobId);
         rawReply = buildCodexErrorReply({
           error,
           role: route.role,
           accountRole: accountRoute.role,
           sessionMode: sessionMemory.routeMode,
           codexCommand: this.options.config.codex[route.role].command,
-        });
+        }) + "\n诊断编号：" + reference;
       } finally {
         const activeTurn = this.activeTurns.get(activeTurnKey);
         if (activeTurn?.controller === turnController) {

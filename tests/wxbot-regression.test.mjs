@@ -9,7 +9,11 @@ import { fileURLToPath } from "node:url";
 import { InboundTaskQueue } from "../dist/apps/server/transport/ilink/inbound-task-queue.js";
 import { parseBuiltInCommand } from "../dist/apps/server/commands/parse-command.js";
 import { parseNaturalFileRequest } from "../dist/apps/server/commands/file-actions.js";
-import { sendTextMessage } from "../dist/apps/server/transport/ilink/media.js";
+import {
+  sendTextMessage,
+  sendUploadedFileMessage,
+  uploadLocalMedia,
+} from "../dist/apps/server/transport/ilink/media.js";
 import {
   createFamilyApiStreamingSender,
   createProgressReplySender,
@@ -73,6 +77,57 @@ test("text sender delivers every generated chunk", async () => {
   assert.ok(requests.length > 1);
   assert.equal(sentText, text);
   assert.equal(clientId, requests.at(-1).msg.client_id);
+});
+
+test("outbound images use iLink image items while other files remain file items", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ilink-outbound-media-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(null, {
+    status: 200,
+    headers: { "x-encrypted-param": "encrypted-media-param" },
+  });
+  const uploadRequests = [];
+  const sentRequests = [];
+  const client = {
+    cdnBaseUrl: "https://cdn.example.test",
+    async getUploadUrl(request) {
+      uploadRequests.push(request);
+      return { upload_param: "upload-param" };
+    },
+    async sendMessage(request) {
+      sentRequests.push(request);
+      return { ret: 0 };
+    },
+  };
+
+  for (const [name, expectedMediaType, expectedItemType] of [
+    ["generated.png", 1, 2],
+    ["report.pdf", 3, 4],
+  ]) {
+    const filePath = path.join(root, name);
+    fs.writeFileSync(filePath, "media-payload");
+    const uploaded = await uploadLocalMedia({ client, filePath, toUserId: "contact" });
+    await sendUploadedFileMessage({
+      client,
+      toUserId: "contact",
+      contextToken: "context",
+      uploaded,
+    });
+    assert.equal(uploadRequests.at(-1).media_type, expectedMediaType);
+    assert.equal(uploadRequests.at(-1).no_need_thumb, true);
+    const item = sentRequests.at(-1).msg.item_list[0];
+    assert.equal(item.type, expectedItemType);
+    if (expectedMediaType === 1) {
+      assert.equal(item.image_item.media.encrypt_query_param, "encrypted-media-param");
+      assert.equal(item.image_item.aeskey, uploaded.aesKeyHex);
+      assert.equal(item.image_item.mid_size, uploaded.ciphertextSize);
+      assert.equal(item.file_item, undefined);
+    } else {
+      assert.equal(item.file_item.file_name, "report.pdf");
+    }
+  }
 });
 
 test("progress and streaming send failures mark delivery uncertain", async () => {

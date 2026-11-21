@@ -1,3 +1,4 @@
+import { CapabilityStore } from "./capabilities.js";
 import { parseBuiltInCommand } from "../commands/parse-command.js";
 import type { NormalizedInboundWechatMessage } from "../transport/ilink/inbound.js";
 import fs from "node:fs";
@@ -97,10 +98,12 @@ function toCodexProviderRouteSettingsRecord(
 
 export class AppDatabase {
   private readonly db: DatabaseSync;
+  readonly capabilities: CapabilityStore;
 
   constructor(private readonly filePath: string) {
     ensureParentDir(filePath);
     this.db = new DatabaseSync(filePath);
+    this.capabilities = new CapabilityStore(this.db);
   }
 
   initialize(): void {

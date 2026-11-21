@@ -1,4 +1,6 @@
+import { ModelServiceError, modelFailure } from "../../operations/model-failure.js";
 import { UserRole } from "../../config/types.js";
+import { ModelNotConfiguredError } from "../../settings/model-settings.js";
 import { errorToRedactedMessage } from "../../policy/index.js";
 
 const CONTEXT_COMPACTED_NOTICE_PATTERN =
@@ -56,6 +58,17 @@ export function buildCodexErrorReply(params: {
   sessionMode?: UserRole | undefined;
   codexCommand?: string;
 }): string {
+  if (params.error instanceof ModelNotConfiguredError) {
+    const label = params.error.role === "family" ? "家庭用户 family" : "管理员 admin";
+    return [
+      params.error.message + "。",
+      `请让管理员打开管理后台 → 模型设置，选择“${label}”，填写 API 地址、API Key 和模型，测试连接后点击“保存并生效”。`,
+      "扫码只完成微信绑定；管理员和家庭用户的模型需要分别配置。",
+    ].join("\n");
+  }
+  if (params.error instanceof ModelServiceError) return params.error.message;
+  const classified = modelFailure(params.error);
+  if (["authentication", "rate_limited", "model_unavailable", "network"].includes(classified.code)) return classified.detail;
   const message = errorToRedactedMessage(params.error);
   const codexCommand = params.codexCommand ?? "codex";
   const currentMode = params.sessionMode ?? params.role;

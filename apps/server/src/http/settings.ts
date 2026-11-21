@@ -1,15 +1,17 @@
 import type http from "node:http";
+import type { AppDatabase } from "../storage/database.js";
 import type { AppConfig, UserRole } from "../config/types.js";
 import { checkApiConnection, listApiModels } from "../codex/api-check.js";
 import { applyModelSettings, ModelSettingsStore, SettingsBusyError, SettingsInputError, type ModelSettings } from "../settings/model-settings.js";
 import { readJsonBody, respondJson } from "./response.js";
 export interface SettingsRoutes {
+  redeliverMedia?: ((id: string) => Promise<void>) | undefined;
   settings?: ModelSettingsStore | undefined;
   saveModelSettings?: ((role: UserRole, value: ModelSettings) => void) | undefined;
 }
 const testing = new WeakSet<ModelSettingsStore>();
 export async function handleSettingsRoutes(context: SettingsRoutes & {
-  request: http.IncomingMessage; response: http.ServerResponse; config: AppConfig; pathname: string; method: string;
+  request: http.IncomingMessage; response: http.ServerResponse; config: AppConfig; database?: AppDatabase; pathname: string; method: string;
 }): Promise<boolean> {
   if (!['/api/settings/models', '/api/settings/models/test', '/api/settings/models/list'].includes(context.pathname)) return false;
   const { settings, response } = context;
@@ -38,6 +40,7 @@ export async function handleSettingsRoutes(context: SettingsRoutes & {
       testing.add(settings);
       try {
         const result = await checkApiConnection(applyModelSettings(context.config.codex[body.role], value));
+        context.database?.capabilities.recordCheck(body.role, settings.fingerprint(body.role, value), result.ok, result.code ?? null);
         respondJson(response, 200, { ...result, scope: 'API only; ACP sandbox not tested' });
       } finally { testing.delete(settings); }
     } else {

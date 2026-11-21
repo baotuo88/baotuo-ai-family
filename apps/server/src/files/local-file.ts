@@ -9,6 +9,7 @@ import {
   uploadLocalMedia,
   UploadedIlinkMedia,
 } from "../transport/ilink/media.js";
+import { ILinkUploadMediaType } from "../transport/ilink/protocol.js";
 import { isInsideDirectory } from "./path-utils.js";
 
 export interface LocalFileSendResult {
@@ -39,6 +40,8 @@ export function inferMimeType(filePath: string): string {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
   };
 
   return known[extension] ?? "application/octet-stream";
@@ -74,6 +77,10 @@ export async function sendLocalFileToSession(params: {
   session: SessionRecord;
   filePath: string;
   caption?: string;
+  signal?: AbortSignal;
+  onDeliveryStart?: () => void;
+  onDeliveryAccepted?: () => void;
+  onDeliveryUncertain?: () => void;
 }): Promise<LocalFileSendResult> {
   const filePath = path.resolve(params.filePath);
   const stat = fs.statSync(filePath);
@@ -92,12 +99,18 @@ export async function sendLocalFileToSession(params: {
     outboundStatus: "uploading",
   });
 
+  let sending = false;
   try {
+    params.signal?.throwIfAborted();
     const uploaded = await uploadLocalMedia({
       client: params.client,
       filePath,
       toUserId: params.session.contactId,
+      ...(params.signal ? { signal: params.signal } : {}),
     });
+    params.signal?.throwIfAborted();
+    sending = true;
+    params.onDeliveryStart?.();
     const clientId = await sendUploadedFileMessage({
       client: params.client,
       toUserId: params.session.contactId,
@@ -106,12 +119,13 @@ export async function sendLocalFileToSession(params: {
       ...(params.caption ? { caption: params.caption } : {}),
     });
 
+    params.onDeliveryAccepted?.();
     params.database.updateAttachmentStatus(attachmentId, "sent");
     params.database.appendMessage({
       id: createClientId("outbound-file"),
       sessionId: params.session.id,
       direction: "outbound",
-      messageType: "file",
+      messageType: uploaded.mediaType === ILinkUploadMediaType.IMAGE ? "image" : "file",
       filePath,
       createdAt: new Date().toISOString(),
       sourceMessageId: clientId,
@@ -126,6 +140,7 @@ export async function sendLocalFileToSession(params: {
       uploaded,
     };
   } catch (error) {
+    if (sending) params.onDeliveryUncertain?.();
     params.database.updateAttachmentStatus(attachmentId, "failed");
     throw error;
   }

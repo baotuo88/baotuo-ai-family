@@ -1223,6 +1223,7 @@ export function buildCommandReply(params: {
             "/recent 查看最近几条消息",
             "/summary 查看当前摘要",
             "/new 开启新话题，/reset /clear 彻底清空当前对话",
+            "/画图 <提示词> 生成图片（需管理员启用与授权，/image 同义）",
             "/file <文件路径> [说明] 发送允许目录里的服务器文件",
             "/files 查看最近可发送文件",
             "/accounts 查看已绑定微信账号",
@@ -1240,6 +1241,7 @@ export function buildCommandReply(params: {
             "/last 查看上一段对话",
             "/yesterday 查看昨天的上一段对话",
             "/new 开启新话题，/reset /clear 彻底清空当前对话",
+            "/画图 <提示词> 生成图片（需管理员启用与授权，/image 同义）",
             "/file <outbox文件路径> [说明] 回传当前会话产出的成品文件",
             "/output 查看或切换过程输出",
           ].join("\n");

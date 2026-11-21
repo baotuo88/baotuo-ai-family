@@ -1,8 +1,9 @@
+import { modelFailure, type ModelFailureCode } from "../operations/model-failure.js";
 import { randomUUID } from "node:crypto";
 import type { CodexRuntimeConfig } from "../config/types.js";
 import { ApiCodexBackend } from "./api-backend.js";
 
-export interface ApiCheckResult { ok: boolean; detail: string }
+export interface ApiCheckResult { ok: boolean; detail: string; code?: ModelFailureCode }
 
 export interface ApiModelListResult { ok: boolean; models: string[]; detail: string }
 
@@ -52,7 +53,7 @@ export async function listApiModels(baseUrl: string, apiKey: string): Promise<Ap
 }
 
 export async function checkApiConnection(config: CodexRuntimeConfig): Promise<ApiCheckResult> {
-  if (!config.apiBaseUrl || !config.apiKey) return { ok: false, detail: "缺少 API_BASE_URL 或 API_KEY" };
+  if (!config.apiBaseUrl || !config.apiKey) return { ok: false, code: "not_configured", detail: "缺少 API_BASE_URL 或 API_KEY" };
   try {
     if (!validateApiUrl(config.apiBaseUrl)) {
       return { ok: false, detail: "API 地址必须是无内嵌凭据、查询参数和片段的 HTTP(S) 地址" };
@@ -69,7 +70,7 @@ export async function checkApiConnection(config: CodexRuntimeConfig): Promise<Ap
       return { ok: true, detail: "模型已返回有效文本（使用正式 API 后端及协议回退逻辑）" };
     }
     // Never print upstream error bodies: providers can echo request credentials.
-    return { ok: false, detail: result.timedOut ? "API 连接超时" : "API 未返回有效文本，请检查地址、Key、模型及额度" };
-  } catch { return { ok: false, detail: "API 连接失败，请检查配置和网络" }; }
+    return { ok: false, ...modelFailure(new Error(result.timedOut ? "API timed out" : result.stderr || "未返回有效文本")) };
+  } catch (error) { return { ok: false, ...modelFailure(error) }; }
   finally { backend.dispose(); }
 }

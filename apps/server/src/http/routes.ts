@@ -1,3 +1,4 @@
+import { handleCapabilityRoutes } from "./capabilities.js";
 import { handleSettingsRoutes } from "./settings.js";
 import { renderAdminPage } from "./admin-page.js";
 import type { SettingsRoutes } from "./settings.js";
@@ -48,6 +49,14 @@ const ROOT_ENDPOINTS = [
   "/api/jobs/:id/resolve",
   "/api/status",
   "/admin",
+  "/api/setup",
+  "/api/settings/images",
+  "/api/settings/models/copy",
+  "/api/members",
+  "/api/media",
+  "/api/media/:id/content",
+  "/api/media/:id/redeliver",
+  "/api/diagnostics",
   "/api/settings/models",
   "/api/settings/models/test",
   "/api/settings/models/list",
@@ -155,6 +164,7 @@ export async function routeHttpRequest(params: SettingsRoutes & {
     respondHtml(context.response, 200, page.html);
     return;
   }
+  if (await handleCapabilityRoutes(context)) return;
   if (await handleSettingsRoutes(context)) return;
   if (context.pathname === "/api/contacts" && context.method === "GET") {
     respondJson(context.response, 200, { ok: true, contacts: context.database.listContacts() });

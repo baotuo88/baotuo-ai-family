@@ -89,10 +89,10 @@ function createClientId(): string {
   return `baotuo-ai-family-${crypto.randomUUID()}`;
 }
 
-function detectUploadMediaType(_filePath: string): ILinkUploadMediaTypeValue {
-  // The v0 path intentionally sends local artifacts as FILE. IMAGE/VIDEO need
-  // thumbnail handling, which should be added separately after file E2E is stable.
-  return ILinkUploadMediaType.FILE;
+function detectUploadMediaType(filePath: string): ILinkUploadMediaTypeValue {
+  return /\.(?:jpe?g|png|gif|webp)$/i.test(filePath)
+    ? ILinkUploadMediaType.IMAGE
+    : ILinkUploadMediaType.FILE;
 }
 
 export interface UploadedIlinkMedia {
@@ -112,6 +112,7 @@ export async function uploadEncryptedBufferToCdn(params: {
   cdnBaseUrl: string;
   fileKey: string;
   aesKey: Buffer;
+  signal?: AbortSignal;
 }): Promise<string> {
   const ciphertext = encryptAesEcb(params.buffer, params.aesKey);
   const url = buildUploadUrl({
@@ -128,7 +129,9 @@ export async function uploadEncryptedBufferToCdn(params: {
 
   for (let attempt = 1; attempt <= CDN_UPLOAD_RETRIES; attempt += 1) {
     try {
+      params.signal?.throwIfAborted();
       const response = await fetch(url, {
+        signal: params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),
         method: "POST",
         headers: {
           "Content-Type": "application/octet-stream",
@@ -160,6 +163,7 @@ export async function uploadEncryptedBufferToCdn(params: {
       return encryptedParam;
     } catch (error) {
       lastError = error;
+      if (params.signal?.aborted) throw error;
       if (
         error instanceof Error &&
         error.message.includes("client error")
@@ -254,8 +258,9 @@ export async function uploadLocalMedia(params: {
   client: ILinkApiClient;
   filePath: string;
   toUserId: string;
+  signal?: AbortSignal;
 }): Promise<UploadedIlinkMedia> {
-  const buffer = await fs.readFile(params.filePath);
+  const buffer = await fs.readFile(params.filePath, params.signal ? { signal: params.signal } : {});
   const mediaType = detectUploadMediaType(params.filePath);
   const fileKey = crypto.randomBytes(16).toString("hex");
   const aesKey = crypto.randomBytes(16);
@@ -286,6 +291,7 @@ export async function uploadLocalMedia(params: {
     cdnBaseUrl: params.client.cdnBaseUrl,
     fileKey,
     aesKey,
+    ...(params.signal ? { signal: params.signal } : {}),
   });
 
   return {
@@ -359,6 +365,32 @@ export async function sendUploadedFileMessage(params: {
   }
 
   const clientId = createClientId();
+  const encodedAesKey = Buffer.from(params.uploaded.aesKeyHex, "utf8").toString(
+    "base64",
+  );
+  const media: ILinkCdnMedia = {
+    encrypt_query_param: params.uploaded.downloadEncryptedQueryParam,
+    aes_key: encodedAesKey,
+    encrypt_type: 1,
+  };
+  const item = params.uploaded.mediaType === ILinkUploadMediaType.IMAGE
+    ? {
+        type: ILinkMessageItemType.IMAGE,
+        image_item: {
+          media,
+          aeskey: params.uploaded.aesKeyHex,
+          mid_size: params.uploaded.ciphertextSize,
+        },
+      }
+    : {
+        type: ILinkMessageItemType.FILE,
+        file_item: {
+          file_name: params.uploaded.fileName,
+          md5: params.uploaded.plaintextMd5,
+          len: String(params.uploaded.plaintextSize),
+          media,
+        },
+      };
   const request: ILinkSendMessageRequest = {
     msg: {
       from_user_id: "",
@@ -368,22 +400,7 @@ export async function sendUploadedFileMessage(params: {
       message_state: ILinkMessageState.FINISH,
       context_token: params.contextToken,
       item_list: [
-        {
-          type: ILinkMessageItemType.FILE,
-          file_item: {
-            file_name: params.uploaded.fileName,
-            md5: params.uploaded.plaintextMd5,
-            len: String(params.uploaded.plaintextSize),
-            media: {
-              encrypt_query_param:
-                params.uploaded.downloadEncryptedQueryParam,
-              aes_key: Buffer.from(params.uploaded.aesKeyHex, "utf8").toString(
-                "base64",
-              ),
-              encrypt_type: 1,
-            },
-          },
-        },
+        item,
       ],
     },
   };

@@ -74,6 +74,7 @@ async function bootstrap(): Promise<void> {
     startedAt,
     getRuntimeStatus: () => worker.getRuntimeStatus(),
     settings,
+    redeliverMedia: id => worker.redeliverMedia(id),
     saveModelSettings: (role, value) => worker.saveModelSettings(role, value),
   });
 

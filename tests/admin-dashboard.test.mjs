@@ -159,6 +159,69 @@ test('model changes reject CSRF and active tasks, apply atomically when idle, an
   assert.throws(() => f.worker.getBackendForTurn({ role: 'family', userText: '运行命令', attachments: [] }), /纯 API/);
 });
 
+async function confirmFamilyLogin(f) {
+  const { LoginManager } = await import('../dist/apps/server/http/login-manager.js');
+  const manager = new LoginManager(f.config, f.database);
+  const now = new Date().toISOString();
+  manager.pending.set('family-login', { id: 'family-login', role: 'family', qrcode: 'test-qr',
+    qrcodeContentUrl: '', qrcodeFilePath: '', status: 'waiting', refreshCount: 0, createdAt: now, updatedAt: now });
+  await manager.handleQrStatus('family-login', { status: 'confirmed', bot_token: 'wechat-token',
+    ilink_bot_id: 'new-family', ilink_user_id: 'family-owner', baseurl: 'https://wechat.invalid/' }, {});
+  assert.equal(manager.serializeById('family-login').status, 'confirmed');
+  return f.database.getAccountById('new-family');
+}
+
+async function chatAsNewFamily(f, account, expectFailure = false) {
+  const replies = [];
+  const client = { async getConfig() { return {}; }, async sendMessage(request) {
+    replies.push(...request.msg.item_list.map(item => item.text_item?.text || '')); return { ret: 0 };
+  } };
+  const turn = f.worker.handleInboundMessage(account, client, { wechatAccountId: account.id, contactId: 'family-owner',
+    text: '你好', mediaSummary: '', attachments: [], contextToken: 'wechat-context',
+    receivedAt: new Date().toISOString(), sourceMessageId: 'family-hello' });
+  if (expectFailure) await assert.rejects(turn, /Task failed/);
+  else await turn;
+  return replies.join('');
+}
+
+test('newly scanned family accounts can chat through the configured family API without admin grants', async t => {
+  const f = fixture(t), originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const { ApiCodexBackend } = await import('../dist/apps/server/codex/api-backend.js');
+  f.worker.saveModelSettings('family', f.settings.prepare('family', value));
+  const backend = f.worker.codexBackends['family-api'];
+  const realApi = new ApiCodexBackend(backend.config);
+  t.after(() => realApi.dispose());
+  backend.run = request => realApi.run(request);
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), key: options.headers.Authorization, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ output_text: '家庭模型回复成功' }), { status: 200 });
+  };
+  const account = await confirmFamilyLogin(f);
+  assert.equal(account.role, 'family');
+  assert.equal(f.database.isAdminContact(account.id, 'family-owner'), false);
+  const reply = await chatAsNewFamily(f, account);
+  assert.equal(reply, '家庭模型回复成功');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.model, value.model);
+  assert.equal(f.database.getSessionByPeer(account.id, 'family-owner').role, 'family');
+});
+
+test('scanning a family account does not implicitly grant access to administrator model credentials', async t => {
+  const f = fixture(t);
+  f.config.codex.family.apiBaseUrl = '';
+  f.config.codex.family.apiKey = '';
+  f.config.codex.family.codexHome = path.join(f.root, 'empty-codex-home');
+  f.worker.saveModelSettings('admin', f.settings.prepare('admin', value));
+  const account = await confirmFamilyLogin(f);
+  const reply = await chatAsNewFamily(f, account, true);
+  assert.match(reply, /家庭聊天模型尚未配置/);
+  assert.match(reply, /家庭用户 family/);
+  assert.match(reply, /测试连接.*保存并生效/);
+  assert.equal(f.settings.get('family'), undefined);
+});
+
 test('API test uses candidate settings, sanitizes failure and never saves credentials', async t => {
   const f = fixture(t), original = global.fetch;
   t.after(() => { global.fetch = original; });

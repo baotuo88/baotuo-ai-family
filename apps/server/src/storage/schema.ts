@@ -1,4 +1,6 @@
-export const SQLITE_SCHEMA = `
+import { CAPABILITY_SCHEMA } from "./capabilities.js";
+
+export const SQLITE_SCHEMA = CAPABILITY_SCHEMA + `
 CREATE TABLE IF NOT EXISTS wechat_accounts (
   id TEXT PRIMARY KEY,
   display_name TEXT,

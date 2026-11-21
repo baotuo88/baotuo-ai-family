@@ -25,6 +25,8 @@ pnpm verify
 
 管理后台的模型设置支持通过 API 地址和 Key 获取 `/models` 列表；只返回模型 ID，仍可手动输入未列出的模型。`接口协议` 可选自动、Responses API 或 Chat Completions；自动模式保留 Responses 优先、失败后回退 Chat Completions 的行为，指定协议时不会探测另一种接口。模型列表请求不会保存新 Key，已有 Key 仍由设置存储加密保管。
 
+出站 `.jpg`、`.jpeg`、`.png`、`.gif`、`.webp` 文件按 iLink 图片消息发送，其他格式仍作为文件附件。图片 CDN 上传沿用无缩略图模式；是否能在目标微信客户端正常展示以及 CDN 对具体图片大小的接受情况，仍需真实账号验收。生图通过独立的 Images API 适配器接入，使用 `/画图` 或 `/image`；需先在后台配置并开启成员权限。视频消息和视频生成尚未接入。
+
 `WECHAT_MAX_CONCURRENT_TASKS` 仍限制普通任务总并发；`WECHAT_ADMIN_MAX_CONCURRENT`、`WECHAT_FAMILY_API_MAX_CONCURRENT`、`WECHAT_FAMILY_ACP_MAX_CONCURRENT` 分别进一步限制管理员、家庭 API、家庭 ACP 调用。同一联系人仍按序处理，停止命令走独立控制通道。`/api/status` 在排队数、最老等待时间、待复核任务数或轮询异常时返回 `alerts`；Worker 也会输出限频的 `operational_alert` JSON 日志。队列和待复核阈值可用 `WECHAT_QUEUE_ALERT_SIZE`、`WECHAT_QUEUE_ALERT_AGE_MS`、`WECHAT_REVIEW_ALERT_COUNT` 调整。该告警需由部署方采集状态接口或容器日志，不会主动发送外部通知。
 
 任务生命周期和轮询失败增加 JSON 日志：`job_started`、`job_succeeded`、`job_needs_review`、`poll_failed`。任务日志使用 jobId 关联，成功/失败记录 durationMs，不记录消息正文、凭据和上游错误原文。其他旧日志尚未全部结构化。
@@ -70,8 +72,31 @@ pnpm cleanup -- --apply
 
 只扫描 `inbox/`、`office/`、`outbox/`。超过保留期限的旧文件进入候选；仍超容量时，再从最旧的非活动会话文件开始补足。活动会话工作区受保护。符号链接会使预览失败，避免跟随目录外路径；应用计划时会复核文件大小，预览后发生变化的文件会跳过。聊天记录、会话摘要、SQLite、备份、`codex-home` 和运行工作区不在清理范围内。这个容量上限是离线清理目标，不会阻断新附件下载；若受保护数据本身超过上限，命令会明确报告无法满足。
 
+## 生图运行与诊断
+
+- `/api/setup` 返回每个角色是否具备 API 配置及匹配当前配置指纹的最近连接测试，不把“有 Key”当作已验证；ACP 沙箱不在 API 测试范围内。
+- `/api/settings/models/copy` 需 `confirm: true`；仅把已配置管理员模型复制为 family 的纯 API 后端，不授予联系人权限。
+- `/api/settings/images` 保存独立生图配置，写入现有加密配置文件；不复用聊天 Key、不在保存时生成测试图片。
+- `/api/members` 管理账号/联系人级权限与次数，`/api/diagnostics` 查看安全错误分类和微信回复中的诊断编号。按北京时间自然日记次数，提交前预留，失败不自动退还，不是计费数据。
+- `/api/media` 查看最近 100 条生成记录；`/api/media/:id/content` 需管理认证，文件缺失或越界返回 410；`/api/media/:id/redeliver` 需 `confirm: true`，只向原联系人当前有效会话补发已有作品。所有新写接口要求 JSON 和 `X-Gateway-Request: dashboard`。
+- 生图不自动重试付费提交。`needs_review` 可能表示提交后断网、超时或取消；先检查上游结果。媒体 `delivery_status=uncertain` 可能已送达，补发前请核实。重启只恢复状态，不重跑。
+- 生成文件受 outbox 清理规则管理，记录不随文件清理删除；完整备份包含 SQLite、生图加密设置及 outbox。恢复后的相对路径指向恢复目录，不依赖原数据目录。
+
+详细使用步骤见 [网页管理后台](admin-dashboard.md)。
+
+## 本次部署测试的已知问题（2026-11-21）
+
+以下问题已通过本地模拟复现，本次功能提交尚未修复：
+
+- 管理员任务已选定后端并等待并发名额时，撤销联系人授权不会阻止它继续调用原管理员后端。测试期间撤销权限后，应停止服务以取消在途任务，再启动。
+- 入站附件先完整下载到内存、解密，再检查实际大小，超限响应仍可能占用较多内存。
+- 生图接口成功后若本地写入失败，结果不能保留，当前记录仅显示普通失败。重新生成前需先核对供应商结果与费用，并检查输出目录及磁盘。
+- 生图结果链接的 DNS 解析等待不响应取消信号，可能延迟停止任务和退出服务。
+
+这些场景未被当前通过的 86 项自动测试覆盖；真实微信图片展示及供应商兼容性仍需部署验收。
+
 ## 后续阶段
 
-- 加密备份与恢复演练。
+- 真实微信图片发送与供应商兼容性验收，通过后再接入视频任务。
 - Worker 调度/轮询/回复模块的大规模拆分。
 - 真实微信/API/ACP、Docker 构建及部署验证。
